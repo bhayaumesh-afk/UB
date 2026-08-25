@@ -1,5 +1,47 @@
 import { describe, expect, it, vi } from "vitest";
-import { filterGroundedOffers, GeminiPriceProvider } from "@/lib/providers/gemini";
+import { filterGroundedOffers, GeminiPriceProvider, parseServiceAccountJson } from "@/lib/providers/gemini";
+
+const FAKE_SA_JSON = JSON.stringify({
+  client_email: "test@example.iam.gserviceaccount.com",
+  private_key: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+  project_id: "test-project",
+});
+
+describe("parseServiceAccountJson", () => {
+  it("parses valid service-account JSON", () => {
+    expect(parseServiceAccountJson(FAKE_SA_JSON)).toEqual({
+      client_email: "test@example.iam.gserviceaccount.com",
+      private_key: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+      project_id: "test-project",
+    });
+  });
+
+  it("throws on malformed JSON", () => {
+    expect(() => parseServiceAccountJson("not json")).toThrow();
+  });
+
+  it("throws when required fields are missing", () => {
+    expect(() => parseServiceAccountJson(JSON.stringify({ client_email: "x" }))).toThrow();
+  });
+});
+
+describe("GeminiPriceProvider construction", () => {
+  it("constructs successfully with a valid apiKey", () => {
+    expect(new GeminiPriceProvider({ apiKey: "fake-key" }).name).toBe("gemini");
+  });
+
+  it("constructs successfully with valid credentialsJson", () => {
+    expect(new GeminiPriceProvider({ credentialsJson: FAKE_SA_JSON }).name).toBe("gemini");
+  });
+
+  it("throws when neither credentialsJson nor apiKey is provided", () => {
+    expect(() => new GeminiPriceProvider({})).toThrow();
+  });
+
+  it("throws when credentialsJson is malformed, even if apiKey is also present", () => {
+    expect(() => new GeminiPriceProvider({ credentialsJson: "not json", apiKey: "fake-key" })).toThrow();
+  });
+});
 
 describe("filterGroundedOffers", () => {
   const groundedUrls = ["https://www.amazon.com/dp/1", "https://www.walmart.com/ip/2", "https://sketchy-deals.example/x"];
@@ -111,7 +153,7 @@ vi.mock("@google/genai", () => ({
 
 describe("GeminiPriceProvider.search (mocked SDK)", () => {
   it("returns only offers that are both grounded and trusted, sorted ascending", async () => {
-    const provider = new GeminiPriceProvider("fake-key");
+    const provider = new GeminiPriceProvider({ apiKey: "fake-key" });
     const offers = await provider.search({ query: "wireless headphones", title: "wireless headphones", confidence: 1 });
 
     expect(offers.map((o) => o.store)).toEqual(["Walmart", "Amazon"]);
@@ -133,7 +175,7 @@ describe("GeminiPriceProvider.search (mocked SDK)", () => {
       text: JSON.stringify([{ store: "Sketchy Deals", price: 10, url: "https://sketchy-deals.example/x" }]),
     }));
 
-    const provider = new GeminiPriceProvider("fake-key");
+    const provider = new GeminiPriceProvider({ apiKey: "fake-key" });
     await expect(
       provider.search({ query: "wireless headphones", title: "wireless headphones", confidence: 1 })
     ).rejects.toThrow();

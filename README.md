@@ -30,10 +30,21 @@ app never scrapes retailer HTML directly; SerpApi is the primary live price
 source, by design.
 
 **Alternative live source — Gemini, no paid signup required.** If
-`SERPAPI_KEY` isn't set but **`GEMINI_API_KEY`** is, the app uses Gemini
+`SERPAPI_KEY` isn't set but Gemini credentials are, the app uses Gemini
 (via the official [`@google/genai`](https://www.npmjs.com/package/@google/genai)
-SDK, a free key from [Google AI Studio](https://aistudio.google.com/apikey))
-to find live prices instead. Priority order is SerpApi → Gemini → mock.
+SDK) to find live prices instead. Priority order is SerpApi → Gemini → mock.
+Two ways to authenticate the Gemini provider (if both are set,
+`GOOGLE_VERTEX_CREDENTIALS_JSON` takes priority):
+- **`GOOGLE_VERTEX_CREDENTIALS_JSON`** — a downloaded Vertex AI service-account
+  JSON. Authenticated via the SDK's Vertex AI mode using a
+  [`google-auth-library`](https://www.npmjs.com/package/google-auth-library)
+  `JWT` client built from the service account's email/private key — no
+  `gcloud` CLI or Application Default Credentials file needed, so this works
+  in a stateless serverless deployment.
+- **`GEMINI_API_KEY`** — a plain Gemini Developer API key, free from
+  [Google AI Studio](https://aistudio.google.com/apikey). Simpler to set up,
+  no GCP project required.
+
 Gemini is a general-purpose model, not a shopping API, so this never trusts
 it to invent a price or URL from its own knowledge: it uses Google Search
 grounding to get real citation URLs, then a second structured-extraction
@@ -66,7 +77,9 @@ demo-mode banner and sample offers; add `SERPAPI_KEY` for live prices.
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Yes | Powers `/api/identify` via the Anthropic SDK. Without it, text inputs (name/description) fall back to a simple heuristic normalizer, and image uploads return a clear error since identifying a photo requires vision. |
 | `SERPAPI_KEY` | No | Enables live prices via SerpApi's Google Shopping engine. Omit it to run in demo mode with mock offers. |
-| `GEMINI_API_KEY` | No | 2nd-choice live price source (Google Search-grounded, no paid signup) used only when `SERPAPI_KEY` is unset. Get a free key from [Google AI Studio](https://aistudio.google.com/apikey). Offer links are filtered through the trusted-vendor allow-list — see caveat above. |
+| `GOOGLE_VERTEX_CREDENTIALS_JSON` | No | 2nd-choice live price source (Google Search-grounded), used only when `SERPAPI_KEY` is unset. Paste the full downloaded Vertex AI service-account JSON as a single-line string. Takes priority over `GEMINI_API_KEY` if both are set. Offer links are filtered through the trusted-vendor allow-list — see caveat above. |
+| `GOOGLE_VERTEX_LOCATION` | No | Vertex AI region for the service-account auth path. Defaults to `us-central1`. |
+| `GEMINI_API_KEY` | No | Simpler alternative to `GOOGLE_VERTEX_CREDENTIALS_JSON` — a plain key from [Google AI Studio](https://aistudio.google.com/apikey), no GCP project needed. |
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | No | Upstash Redis REST credentials for a shared, durable ~15-minute cache of search results across serverless invocations. Omit both to use an in-memory cache instead (per-instance, cleared on cold start). |
 | `NEXT_PUBLIC_APP_NAME` | No | Display name shown in the page title/header. Defaults to "PriceScout". |
 
@@ -101,7 +114,7 @@ tests/e2e/                  Playwright: name-tab search -> results end to end
 
 The price provider layer is the key abstraction: `lib/providers/index.ts`
 returns a `SerpApiPriceProvider` when `SERPAPI_KEY` is set, else a
-`GeminiPriceProvider` when `GEMINI_API_KEY` is set, else the
+`GeminiPriceProvider` when either Gemini credential is set, else the
 `MockPriceProvider` — every caller only depends on the shared
 `PriceProvider` interface. This keeps the live-data path swappable (e.g. for
 another licensed aggregator) without touching API routes or UI.
@@ -124,7 +137,7 @@ npm run build         # production build
 3. Under **Project Settings → Environment Variables**, add:
    - `ANTHROPIC_API_KEY` (required)
    - `SERPAPI_KEY` (optional — omit to launch in demo mode, add later for live prices)
-   - `GEMINI_API_KEY` (optional — free live-price fallback if `SERPAPI_KEY` isn't set; see caveat above)
+   - `GOOGLE_VERTEX_CREDENTIALS_JSON` / `GOOGLE_VERTEX_LOCATION` **or** `GEMINI_API_KEY` (optional — live-price fallback if `SERPAPI_KEY` isn't set; see caveat above)
    - `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` (optional)
    - `NEXT_PUBLIC_APP_NAME` (optional)
 4. Deploy. The app is fully functional immediately with just
