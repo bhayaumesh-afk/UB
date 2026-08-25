@@ -1,13 +1,21 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import { JWT } from "google-auth-library";
 import type { NormalizedQuery, Offer } from "@/types";
 import { convertToUsd } from "@/lib/currency";
 import { isTrustedVendorUrl, TRUSTED_VENDOR_DOMAINS } from "@/lib/trustedVendors";
 import type { PriceProvider } from "./types";
 
-// Live price source using the official Gemini SDK (Gemini Developer API, driven by
-// GEMINI_API_KEY — not Vertex AI). Gemini is a general-purpose model, not a shopping
-// API, so it must never be trusted to invent prices or URLs from its own knowledge.
-// This uses a two-call pattern:
+// Live price source using the official Gemini SDK (`@google/genai`). Supports two
+// ways to authenticate:
+//   - GOOGLE_VERTEX_CREDENTIALS_JSON: a downloaded Vertex AI service-account JSON,
+//     used via the SDK's Vertex AI mode + a google-auth-library JWT client (no
+//     gcloud/ADC file needed — the SDK signs and exchanges the JWT itself).
+//   - GEMINI_API_KEY: a plain Gemini Developer API key from Google AI Studio.
+// If both are set, the service-account JSON takes priority.
+//
+// Gemini is a general-purpose model, not a shopping API, so it must never be
+// trusted to invent prices or URLs from its own knowledge. This uses a two-call
+// pattern:
 //
 //   1. Grounded search (tools: googleSearch) — get a natural-language answer plus
 //      real source URLs from groundingMetadata.groundingChunks[].web.uri. URLs are
@@ -28,6 +36,62 @@ const PRIMARY_MODEL = "gemini-2.5-flash";
 const FALLBACK_MODEL = "gemini-2.0-flash";
 const CALL_TIMEOUT_MS = 15000;
 const MAX_OFFERS = 8;
+const DEFAULT_VERTEX_LOCATION = "us-central1";
+
+export interface GeminiProviderOptions {
+  /** Downloaded Vertex AI service-account JSON, as a raw string. Takes priority over apiKey. */
+  credentialsJson?: string;
+  /** Plain Gemini Developer API key from Google AI Studio. */
+  apiKey?: string;
+  /** Vertex AI region, only used with credentialsJson. Defaults to "us-central1". */
+  location?: string;
+}
+
+interface ServiceAccountCredentials {
+  client_email: string;
+  private_key: string;
+  project_id: string;
+}
+
+/** Exported for unit testing. */
+export function parseServiceAccountJson(raw: string): ServiceAccountCredentials {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("GOOGLE_VERTEX_CREDENTIALS_JSON is not valid JSON");
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (
+    typeof obj.client_email !== "string" ||
+    typeof obj.private_key !== "string" ||
+    typeof obj.project_id !== "string"
+  ) {
+    throw new Error("GOOGLE_VERTEX_CREDENTIALS_JSON is missing required service-account fields");
+  }
+  return obj as unknown as ServiceAccountCredentials;
+}
+
+function buildGoogleGenAI(options: GeminiProviderOptions): GoogleGenAI {
+  if (options.credentialsJson && options.credentialsJson.trim().length > 0) {
+    const creds = parseServiceAccountJson(options.credentialsJson);
+    const authClient = new JWT({
+      email: creds.client_email,
+      key: creds.private_key,
+      scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+    });
+    return new GoogleGenAI({
+      vertexai: true,
+      project: creds.project_id,
+      location: options.location && options.location.trim().length > 0 ? options.location : DEFAULT_VERTEX_LOCATION,
+      googleAuthOptions: { authClient },
+    });
+  }
+  if (options.apiKey && options.apiKey.trim().length > 0) {
+    return new GoogleGenAI({ apiKey: options.apiKey });
+  }
+  throw new Error("GeminiPriceProvider requires either credentialsJson or apiKey");
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -199,8 +263,8 @@ export class GeminiPriceProvider implements PriceProvider {
   readonly name = "gemini" as const;
   private readonly ai: GoogleGenAI;
 
-  constructor(apiKey: string) {
-    this.ai = new GoogleGenAI({ apiKey });
+  constructor(options: GeminiProviderOptions) {
+    this.ai = buildGoogleGenAI(options);
   }
 
   private async searchWithModel(model: string, query: NormalizedQuery): Promise<Offer[]> {

@@ -31,6 +31,18 @@ describe("provider selection", () => {
     expect(isDemoMode({ GEMINI_API_KEY: "gk-abc123" } as unknown as NodeJS.ProcessEnv)).toBe(false);
   });
 
+  it("selects the Gemini provider when only GOOGLE_VERTEX_CREDENTIALS_JSON is set", () => {
+    const fakeSaJson = JSON.stringify({
+      client_email: "test@example.iam.gserviceaccount.com",
+      private_key: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+      project_id: "test-project",
+    });
+    const provider = getPriceProvider({ GOOGLE_VERTEX_CREDENTIALS_JSON: fakeSaJson } as unknown as NodeJS.ProcessEnv);
+    expect(provider.name).toBe("gemini");
+    expect(provider).toBeInstanceOf(GeminiPriceProvider);
+    expect(isDemoMode({ GOOGLE_VERTEX_CREDENTIALS_JSON: fakeSaJson } as unknown as NodeJS.ProcessEnv)).toBe(false);
+  });
+
   it("falls back to the mock provider when GEMINI_API_KEY is empty", () => {
     const provider = getPriceProvider({ GEMINI_API_KEY: "  " } as unknown as NodeJS.ProcessEnv);
     expect(provider.name).toBe("mock");
