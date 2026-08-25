@@ -2,15 +2,8 @@ import { describe, expect, it } from "vitest";
 import { getPriceProvider, isDemoMode } from "@/lib/providers";
 import { mockProvider, selectMockCategory } from "@/lib/providers/mock";
 import { SerpApiPriceProvider } from "@/lib/providers/serpapi";
-import { VertexGeminiPriceProvider, parseOffersFromModelText } from "@/lib/providers/gemini";
+import { GeminiPriceProvider } from "@/lib/providers/gemini";
 import type { NormalizedQuery } from "@/types";
-
-const FAKE_SA_JSON = JSON.stringify({
-  client_email: "test@example.iam.gserviceaccount.com",
-  private_key: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
-  project_id: "test-project",
-  token_uri: "https://oauth2.googleapis.com/token",
-});
 
 describe("provider selection", () => {
   it("falls back to the mock provider when nothing is configured", () => {
@@ -31,70 +24,24 @@ describe("provider selection", () => {
     expect(isDemoMode({ SERPAPI_KEY: "abc123" } as unknown as NodeJS.ProcessEnv)).toBe(false);
   });
 
-  it("selects the Vertex Gemini provider when only GOOGLE_VERTEX_CREDENTIALS_JSON is set", () => {
-    const provider = getPriceProvider({ GOOGLE_VERTEX_CREDENTIALS_JSON: FAKE_SA_JSON } as unknown as NodeJS.ProcessEnv);
-    expect(provider.name).toBe("vertex-gemini");
-    expect(provider).toBeInstanceOf(VertexGeminiPriceProvider);
-    expect(isDemoMode({ GOOGLE_VERTEX_CREDENTIALS_JSON: FAKE_SA_JSON } as unknown as NodeJS.ProcessEnv)).toBe(false);
+  it("selects the Gemini provider when only GEMINI_API_KEY is set", () => {
+    const provider = getPriceProvider({ GEMINI_API_KEY: "gk-abc123" } as unknown as NodeJS.ProcessEnv);
+    expect(provider.name).toBe("gemini");
+    expect(provider).toBeInstanceOf(GeminiPriceProvider);
+    expect(isDemoMode({ GEMINI_API_KEY: "gk-abc123" } as unknown as NodeJS.ProcessEnv)).toBe(false);
   });
 
-  it("prefers SerpApi over Vertex Gemini when both are configured", () => {
+  it("falls back to the mock provider when GEMINI_API_KEY is empty", () => {
+    const provider = getPriceProvider({ GEMINI_API_KEY: "  " } as unknown as NodeJS.ProcessEnv);
+    expect(provider.name).toBe("mock");
+  });
+
+  it("prefers SerpApi over Gemini when both are configured", () => {
     const provider = getPriceProvider({
       SERPAPI_KEY: "abc123",
-      GOOGLE_VERTEX_CREDENTIALS_JSON: FAKE_SA_JSON,
+      GEMINI_API_KEY: "gk-abc123",
     } as unknown as NodeJS.ProcessEnv);
     expect(provider.name).toBe("serpapi");
-  });
-});
-
-describe("VertexGeminiPriceProvider construction", () => {
-  it("throws when the credentials JSON is malformed", () => {
-    expect(() => new VertexGeminiPriceProvider("not json")).toThrow();
-  });
-
-  it("throws when required service-account fields are missing", () => {
-    expect(() => new VertexGeminiPriceProvider(JSON.stringify({ client_email: "x" }))).toThrow();
-  });
-
-  it("constructs successfully with valid credentials JSON", () => {
-    const provider = new VertexGeminiPriceProvider(FAKE_SA_JSON);
-    expect(provider.name).toBe("vertex-gemini");
-  });
-});
-
-describe("parseOffersFromModelText", () => {
-  it("parses a valid JSON array of offers", () => {
-    const text = '[{"store":"Amazon","price":99.99,"currency":"USD","url":"https://amazon.com/x"}]';
-    expect(parseOffersFromModelText(text)).toEqual([
-      { store: "Amazon", price: 99.99, currency: "USD", url: "https://amazon.com/x" },
-    ]);
-  });
-
-  it("parses offers wrapped in markdown code fences", () => {
-    const text = '```json\n[{"store":"Walmart","price":10,"url":"https://walmart.com/x"}]\n```';
-    expect(parseOffersFromModelText(text)).toEqual([
-      { store: "Walmart", price: 10, currency: "USD", url: "https://walmart.com/x" },
-    ]);
-  });
-
-  it("defaults currency to USD when omitted", () => {
-    const text = '[{"store":"Target","price":5,"url":"https://target.com/x"}]';
-    expect(parseOffersFromModelText(text)[0].currency).toBe("USD");
-  });
-
-  it("drops malformed entries but keeps valid ones", () => {
-    const text = JSON.stringify([
-      { store: "Amazon", price: 10, url: "https://a.com" },
-      { store: "Missing price", url: "https://b.com" },
-      { store: "Bad price", price: -5, url: "https://c.com" },
-      { price: 10, url: "https://d.com" },
-      { store: "No url", price: 10 },
-    ]);
-    expect(parseOffersFromModelText(text)).toEqual([{ store: "Amazon", price: 10, currency: "USD", url: "https://a.com" }]);
-  });
-
-  it("throws when the response is not a JSON array", () => {
-    expect(() => parseOffersFromModelText('{"store":"Amazon"}')).toThrow();
   });
 });
 

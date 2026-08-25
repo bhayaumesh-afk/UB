@@ -29,18 +29,22 @@ Shopping engine) to switch to real, live prices — no code changes needed. The
 app never scrapes retailer HTML directly; SerpApi is the primary live price
 source, by design.
 
-**Alternative live source — Gemini on Vertex AI.** If `SERPAPI_KEY` isn't set
-but **`GOOGLE_VERTEX_CREDENTIALS_JSON`** is, the app uses Gemini (Vertex AI)
-with Google Search grounding to estimate prices instead. This is a fallback
-live option, not a replacement for SerpApi — priority order is SerpApi →
-Vertex Gemini → mock. It's lower-confidence than SerpApi's structured feed:
-in testing it sometimes returned the *same* price across multiple stores
-(the model can fail to find genuinely distinct current prices per retailer)
-and offer links are AI-generated/grounding-derived rather than a guaranteed
-structured product feed. The UI shows a visible notice — *"Prices estimated
-by AI web search (Gemini) — verify at the retailer before buying"* — whenever
-this source is active, and it still falls back to mock data on error like
-every other live source.
+**Alternative live source — Gemini, no paid signup required.** If
+`SERPAPI_KEY` isn't set but **`GEMINI_API_KEY`** is, the app uses Gemini
+(via the official [`@google/genai`](https://www.npmjs.com/package/@google/genai)
+SDK, a free key from [Google AI Studio](https://aistudio.google.com/apikey))
+to find live prices instead. Priority order is SerpApi → Gemini → mock.
+Gemini is a general-purpose model, not a shopping API, so this never trusts
+it to invent a price or URL from its own knowledge: it uses Google Search
+grounding to get real citation URLs, then a second structured-extraction
+call constrained to only those URLs, and every resulting offer is filtered
+through a **trusted-vendor allow-list** (`lib/trustedVendors.ts` —
+Amazon, Walmart, Target, Best Buy, eBay, Costco, Newegg, Home Depot, Apple,
+Samsung, B&H, Adorama) before it's shown — offers on unrecognized domains
+are dropped, never displayed. Verified offers get a "Verified retailer"
+badge in the UI. If nothing survives that filtering, or either Gemini call
+fails or times out, it falls back to mock data like every other live
+source.
 
 If live search ever times out or errors, the app automatically falls back to
 mock data with a visible on-page notice instead of showing a blank error page.
@@ -62,9 +66,7 @@ demo-mode banner and sample offers; add `SERPAPI_KEY` for live prices.
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Yes | Powers `/api/identify` via the Anthropic SDK. Without it, text inputs (name/description) fall back to a simple heuristic normalizer, and image uploads return a clear error since identifying a photo requires vision. |
 | `SERPAPI_KEY` | No | Enables live prices via SerpApi's Google Shopping engine. Omit it to run in demo mode with mock offers. |
-| `GOOGLE_VERTEX_CREDENTIALS_JSON` | No | Fallback live price source: Gemini on Vertex AI with Google Search grounding, used only when `SERPAPI_KEY` is unset. Paste the full downloaded service-account JSON as a single-line string. Requires the Vertex AI API enabled and the service account to have the `Vertex AI User` role. Lower-confidence than SerpApi — see caveat above. |
-| `GOOGLE_VERTEX_LOCATION` | No | Vertex AI region for the Gemini provider. Defaults to `us-central1`. |
-| `GOOGLE_VERTEX_MODEL` | No | Vertex AI model id for the Gemini provider. Defaults to `gemini-2.5-flash`. |
+| `GEMINI_API_KEY` | No | 2nd-choice live price source (Google Search-grounded, no paid signup) used only when `SERPAPI_KEY` is unset. Get a free key from [Google AI Studio](https://aistudio.google.com/apikey). Offer links are filtered through the trusted-vendor allow-list — see caveat above. |
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | No | Upstash Redis REST credentials for a shared, durable ~15-minute cache of search results across serverless invocations. Omit both to use an in-memory cache instead (per-instance, cleared on cold start). |
 | `NEXT_PUBLIC_APP_NAME` | No | Display name shown in the page title/header. Defaults to "PriceScout". |
 
@@ -88,17 +90,19 @@ lib/
   providers/
     types.ts               PriceProvider interface
     serpapi.ts              live provider (SerpApi Google Shopping)
-    gemini.ts                fallback live provider (Vertex AI Gemini + Google Search grounding)
-    mock.ts                   deterministic demo-mode provider
-    index.ts                  picks serpapi -> vertex-gemini -> mock by env vars
+    gemini.ts                 fallback live provider (Gemini + Google Search grounding)
+    mock.ts                    deterministic demo-mode provider
+    index.ts                   picks serpapi -> gemini -> mock by env vars
+  trustedVendors.ts          retailer domain allow-list + isTrustedVendorUrl()
 types/index.ts              shared request/response/data contracts
 tests/unit/                 Vitest: providers, currency, query normalization
 tests/e2e/                  Playwright: name-tab search -> results end to end
 ```
 
 The price provider layer is the key abstraction: `lib/providers/index.ts`
-returns a `SerpApiPriceProvider` when `SERPAPI_KEY` is set, otherwise the
-`MockPriceProvider`, and every caller only depends on the shared
+returns a `SerpApiPriceProvider` when `SERPAPI_KEY` is set, else a
+`GeminiPriceProvider` when `GEMINI_API_KEY` is set, else the
+`MockPriceProvider` — every caller only depends on the shared
 `PriceProvider` interface. This keeps the live-data path swappable (e.g. for
 another licensed aggregator) without touching API routes or UI.
 
@@ -120,7 +124,7 @@ npm run build         # production build
 3. Under **Project Settings → Environment Variables**, add:
    - `ANTHROPIC_API_KEY` (required)
    - `SERPAPI_KEY` (optional — omit to launch in demo mode, add later for live prices)
-   - `GOOGLE_VERTEX_CREDENTIALS_JSON` / `GOOGLE_VERTEX_LOCATION` / `GOOGLE_VERTEX_MODEL` (optional — fallback live source if `SERPAPI_KEY` isn't set; see caveat above)
+   - `GEMINI_API_KEY` (optional — free live-price fallback if `SERPAPI_KEY` isn't set; see caveat above)
    - `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` (optional)
    - `NEXT_PUBLIC_APP_NAME` (optional)
 4. Deploy. The app is fully functional immediately with just
@@ -139,5 +143,6 @@ vercel --prod
 
 ## Out of scope (this pass)
 
-No user accounts/auth, no native mobile app, no retailer HTML scraping (SerpApi
-is the only live price source).
+No user accounts/auth, no native mobile app, no retailer HTML scraping — live
+prices come only from SerpApi's licensed API or Gemini's Google Search
+grounding tool (real citations, filtered to the trusted-vendor allow-list).

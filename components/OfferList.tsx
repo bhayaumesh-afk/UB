@@ -1,4 +1,5 @@
 import type { Offer } from "@/types";
+import VerifiedRetailerBadge from "./VerifiedRetailerBadge";
 
 export default function OfferList({ offers }: { offers: Offer[] }) {
   if (offers.length <= 1) return null;
@@ -14,7 +15,10 @@ export default function OfferList({ offers }: { offers: Offer[] }) {
           className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
         >
           <div>
-            <div className="font-medium text-slate-900">{offer.store}</div>
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-slate-900">{offer.store}</span>
+              <VerifiedRetailerBadge url={offer.url} />
+            </div>
             <div className="text-sm text-slate-500">
               {offer.shipping ?? "Shipping info not available"}
               {offer.rating ? ` · ${offer.rating.toFixed(1)}★` : ""}

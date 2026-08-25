@@ -1,14 +1,14 @@
 import { mockProvider } from "./mock";
 import { SerpApiPriceProvider } from "./serpapi";
-import { VertexGeminiPriceProvider } from "./gemini";
+import { GeminiPriceProvider } from "./gemini";
 import type { PriceProvider } from "./types";
 
 /**
  * Selects the active price provider, in priority order:
  * 1. SerpApi (SERPAPI_KEY) — structured Google Shopping feed, most reliable.
- * 2. Vertex AI Gemini + Google Search grounding (GOOGLE_VERTEX_CREDENTIALS_JSON) —
- *    lower-confidence AI-summarized prices, used as a live fallback when SerpApi
- *    isn't configured.
+ * 2. Gemini + Google Search grounding (GEMINI_API_KEY) — live pricing with no
+ *    paid signup required, used when SerpApi isn't configured. Offer links are
+ *    filtered through the trusted-vendor allow-list (see lib/trustedVendors.ts).
  * 3. Deterministic mock provider (demo mode).
  */
 export function getPriceProvider(env: NodeJS.ProcessEnv = process.env): PriceProvider {
@@ -16,20 +16,20 @@ export function getPriceProvider(env: NodeJS.ProcessEnv = process.env): PricePro
   if (serpKey && serpKey.trim().length > 0) {
     return new SerpApiPriceProvider(serpKey);
   }
-  const vertexCreds = env.GOOGLE_VERTEX_CREDENTIALS_JSON;
-  if (vertexCreds && vertexCreds.trim().length > 0) {
-    return new VertexGeminiPriceProvider(vertexCreds, env.GOOGLE_VERTEX_LOCATION, env.GOOGLE_VERTEX_MODEL);
+  const geminiKey = env.GEMINI_API_KEY;
+  if (geminiKey && geminiKey.trim().length > 0) {
+    return new GeminiPriceProvider(geminiKey);
   }
   return mockProvider;
 }
 
 export function isDemoMode(env: NodeJS.ProcessEnv = process.env): boolean {
   const hasSerp = Boolean(env.SERPAPI_KEY && env.SERPAPI_KEY.trim().length > 0);
-  const hasVertex = Boolean(env.GOOGLE_VERTEX_CREDENTIALS_JSON && env.GOOGLE_VERTEX_CREDENTIALS_JSON.trim().length > 0);
-  return !hasSerp && !hasVertex;
+  const hasGemini = Boolean(env.GEMINI_API_KEY && env.GEMINI_API_KEY.trim().length > 0);
+  return !hasSerp && !hasGemini;
 }
 
 export type { PriceProvider } from "./types";
 export { mockProvider } from "./mock";
 export { SerpApiPriceProvider } from "./serpapi";
-export { VertexGeminiPriceProvider } from "./gemini";
+export { GeminiPriceProvider } from "./gemini";
