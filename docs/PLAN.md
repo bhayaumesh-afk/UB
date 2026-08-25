@@ -93,24 +93,45 @@ available key wins. Each is behind the common `PriceProvider` interface
 - **1st choice: SerpApi Google Shopping engine.** One licensed API call returns price,
   seller, and link across many retailers — the most structured, reliable source. Requires
   `SERPAPI_KEY` (free trial tier, paid beyond that). Not required to run the app.
-- **2nd choice: Gemini + Google Search grounding.** Used when `SERPAPI_KEY` is unset but
-  `GEMINI_API_KEY` is set. Gemini is a general-purpose model, not a shopping API, so this
-  relies specifically on its **Google Search grounding tool**, which returns real, live
-  search-result citations (`groundingMetadata.groundingChunks[].web.uri`) rather than the
-  model's own text. Implementation is a **two-call pattern** (see `lib/providers/gemini.ts`
-  design below), because Gemini does not reliably support combining tool use (grounding)
-  with strict JSON response-schema output in a single call:
-  1. Call `gemini-2.5-flash` (fallback `gemini-2.0-flash` if unavailable in the project)
-     with `tools: [{ googleSearch: {} }]` and a prompt asking it to find current USD prices
-     for the normalized product query at named reputable retailers. Read only the URLs in
-     `groundingMetadata.groundingChunks[].web.uri` — never a URL the model prints in prose,
-     since that could be fabricated.
-  2. Call the model again, no tools, `responseMimeType: "application/json"` with a response
-     schema matching `Offer[]`, passing in call 1's answer text plus the grounded URL list,
-     instructing it to only use URLs from that list.
-  3. Post-process every offer through `isTrustedVendorUrl()` (see Trusted vendors below) and
-     drop anything that doesn't match. If a call fails, times out, or yields zero trusted
-     offers, fall back to the mock provider for that request rather than erroring.
+- **2nd choice: Gemini (Vertex AI) + Google Search grounding, via service-account auth.**
+  Used when `SERPAPI_KEY` is unset but `GCP_SERVICE_ACCOUNT_JSON` is set. This project
+  already has a working, tested service-account credential for Vertex AI (proven via a
+  manual OAuth2 token-exchange test that successfully called `gemini-2.5-flash`) — auth
+  uses that service account, not a `GEMINI_API_KEY`/Developer-API key.
+  - Auth: `google-auth-library`'s `JWT` class, constructed from the parsed JSON's
+    `client_email`/`private_key` fields, scope `https://www.googleapis.com/auth/cloud-platform`,
+    token obtained via `client.getAccessToken()`.
+  - Endpoint: called directly via `fetch` against the Vertex AI REST endpoint
+    (`https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/gemini-2.5-flash:generateContent`),
+    with `Authorization: Bearer <token>` — not the `@google/genai` SDK's Vertex wrapper,
+    since its exact option for in-memory (non-file) credentials isn't reliably documented.
+    `project` comes from the JSON's own `project_id` field; `location` comes from
+    `GCP_VERTEX_LOCATION`, reusing whatever region already worked in this project's earlier
+    auth test — do not guess a different region.
+  - Gemini is a general-purpose model, not a shopping API, so this relies specifically on
+    its **Google Search grounding tool**, which returns real, live search-result citations
+    rather than the model's own text. Implementation is a **two-call pattern**, because
+    Gemini does not reliably support combining tool use (grounding) with strict JSON
+    response-schema output in a single call (confirmed broken/empty grounding metadata when
+    combined, per Google's own developer forum):
+    1. Call `gemini-2.5-flash` with `tools: [{ google_search: {} }]` and a prompt asking it
+       to find current USD prices for the normalized product query at named reputable
+       retailers. Read `groundingMetadata.groundingChunks[].web.uri` — **this is a Google/
+       Vertex redirect URL, not the retailer's real URL** — and `.title` (a domain-like
+       label). Resolve each chunk's real destination by following the redirect server-side
+       (HEAD/GET, short timeout) and use the *final* URL, never the raw grounding URI, as
+       the offer link. Never trust a URL the model prints in prose — only resolved,
+       allow-listed grounding-chunk URLs.
+    2. Call the model again, no tools, `responseMimeType: "application/json"` with a
+       response schema, passing call 1's answer text plus a *numbered list* of the already
+       trusted, resolved chunks (index + domain only, no URLs) — the model returns an index,
+       never a URL string, so it structurally cannot fabricate a link.
+    3. Also surface `groundingMetadata.searchEntryPoint.renderedContent` in the results UI —
+       Google's grounding terms require displaying this attribution widget when grounded
+       results are shown to users.
+  - Post-process every offer through `isTrustedVendorUrl()` (see Trusted vendors below) and
+    drop anything that doesn't match. If a call fails, times out, or yields zero trusted
+    offers, fall back to the mock provider for that request rather than erroring.
 - **3rd choice / fallback: mock provider.** If neither key is set, `lib/providers/index.ts`
   serves deterministic sample offers and the UI shows a "Demo mode" banner. This means the
   app is fully deployable and demoable with zero paid keys.
@@ -144,11 +165,21 @@ cached ~1 hour. Offers converted from another currency are labeled ("converted f
 ```
 ANTHROPIC_API_KEY=
 SERPAPI_KEY=                    # optional — 1st choice for live prices if set
-GEMINI_API_KEY=                 # optional — 2nd choice (Google Search-grounded pricing) if SERPAPI_KEY unset
+GCP_SERVICE_ACCOUNT_JSON=       # optional — 2nd choice: Vertex AI Gemini w/ Google Search
+                                 # grounding if SERPAPI_KEY unset. Full service-account key
+                                 # JSON as one line (minify with `jq -c .` before pasting).
+GCP_VERTEX_LOCATION=             # required alongside GCP_SERVICE_ACCOUNT_JSON — reuse the
+                                 # region already proven working in this project's auth test
 UPSTASH_REDIS_REST_URL=         # optional — in-memory cache used if unset
 UPSTASH_REDIS_REST_TOKEN=       # optional
 NEXT_PUBLIC_APP_NAME=PriceScout
 ```
+
+`GCP_SERVICE_ACCOUNT_JSON` is a broader credential than a plain API key (it's scoped by
+whatever IAM roles are bound to that service account) — treat it with at least the same
+care as a private key: never commit it, never log it, and confirm in the GCP console that
+the service account only holds the roles it actually needs (e.g. `roles/aiplatform.user`),
+not a broad/owner role.
 
 ## Non-functional requirements
 
