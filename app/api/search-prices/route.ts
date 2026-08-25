@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cacheGet, cacheSet } from "@/lib/cache";
 import { getPriceProvider, isDemoMode, mockProvider } from "@/lib/providers";
+import { GeminiPriceProvider } from "@/lib/providers/gemini";
 import { checkRateLimit, getClientIp } from "@/lib/ratelimit";
 import type { NormalizedQuery, Offer, SearchPricesRequestBody, SearchPricesResponseBody } from "@/types";
 
@@ -9,6 +10,12 @@ export const runtime = "nodejs";
 const CACHE_TTL_SECONDS = 15 * 60; // 15 minutes
 
 type ProviderSource = "serpapi" | "gemini" | "mock";
+
+interface CachedResult {
+  offers: Offer[];
+  source: ProviderSource;
+  attributionHtml?: string;
+}
 
 function normalizeQueryForCacheKey(query: SearchPricesRequestBody["query"]): string {
   return `search-prices:${query.query.trim().toLowerCase()}`;
@@ -24,7 +31,7 @@ function noticeFor(source: ProviderSource, demoMode: boolean): string | undefine
   // never on a successful SerpApi or Gemini answer.
   if (source !== "mock") return undefined;
   return demoMode
-    ? "Demo mode — connect SERPAPI_KEY or GEMINI_API_KEY for live prices. Showing sample offers."
+    ? "Demo mode — connect SERPAPI_KEY or GCP_SERVICE_ACCOUNT_JSON for live prices. Showing sample offers."
     : "Live price search is temporarily unavailable — showing sample offers instead.";
 }
 
@@ -53,7 +60,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SearchPricesR
   const cacheKey = normalizeQueryForCacheKey(body.query);
   const demoMode = isDemoMode();
 
-  const cached = await cacheGet<{ offers: Offer[]; source: ProviderSource }>(cacheKey);
+  const cached = await cacheGet<CachedResult>(cacheKey);
   if (cached) {
     return NextResponse.json({
       ok: true,
@@ -61,6 +68,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SearchPricesR
       source: cached.source,
       demoMode,
       notice: noticeFor(cached.source, demoMode),
+      attributionHtml: cached.source === "gemini" ? cached.attributionHtml : undefined,
     });
   }
 
@@ -68,20 +76,32 @@ export async function POST(req: NextRequest): Promise<NextResponse<SearchPricesR
   const isLiveProvider = provider.name !== "mock";
   let offers: Offer[];
   let source: ProviderSource = provider.name;
+  let attributionHtml: string | undefined;
 
   try {
     offers = await provider.search(normalizedQuery);
     if (offers.length === 0 && isLiveProvider) {
       throw new Error("No live offers found");
     }
+    if (provider instanceof GeminiPriceProvider) {
+      attributionHtml = provider.lastAttributionHtml;
+    }
   } catch (err) {
     console.error("search-prices provider error:", err instanceof Error ? err.message : "unknown error");
     // Graceful degradation: never show a blank error page — fall back to mock data.
     offers = await mockProvider.search(normalizedQuery);
     source = "mock";
+    attributionHtml = undefined;
   }
 
-  await cacheSet(cacheKey, { offers, source }, CACHE_TTL_SECONDS);
+  await cacheSet(cacheKey, { offers, source, attributionHtml }, CACHE_TTL_SECONDS);
 
-  return NextResponse.json({ ok: true, offers, source, demoMode, notice: noticeFor(source, demoMode) });
+  return NextResponse.json({
+    ok: true,
+    offers,
+    source,
+    demoMode,
+    notice: noticeFor(source, demoMode),
+    attributionHtml: source === "gemini" ? attributionHtml : undefined,
+  });
 }

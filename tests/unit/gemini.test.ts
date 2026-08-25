@@ -1,181 +1,277 @@
-import { describe, expect, it, vi } from "vitest";
-import { filterGroundedOffers, GeminiPriceProvider, parseServiceAccountJson } from "@/lib/providers/gemini";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { mapExtractedOffers, resolveGroundedChunks, GeminiPriceProvider, type ResolvedChunk } from "@/lib/providers/gemini";
 
-const FAKE_SA_JSON = JSON.stringify({
-  client_email: "test@example.iam.gserviceaccount.com",
-  private_key: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
-  project_id: "test-project",
-});
+describe("mapExtractedOffers", () => {
+  const resolved: ResolvedChunk[] = [
+    { index: 0, url: "https://www.amazon.com/dp/1", domainLabel: "amazon.com" },
+    { index: 1, url: "https://www.walmart.com/ip/2", domainLabel: "walmart.com" },
+  ];
 
-describe("parseServiceAccountJson", () => {
-  it("parses valid service-account JSON", () => {
-    expect(parseServiceAccountJson(FAKE_SA_JSON)).toEqual({
-      client_email: "test@example.iam.gserviceaccount.com",
-      private_key: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
-      project_id: "test-project",
-    });
+  it("maps a valid storeIndex back to the resolved chunk's real URL", () => {
+    const result = mapExtractedOffers(JSON.stringify([{ storeIndex: 0, price: 99.99, currency: "USD" }]), resolved);
+    expect(result).toEqual([{ store: "amazon.com", price: 99.99, url: "https://www.amazon.com/dp/1", currency: "USD" }]);
   });
 
-  it("throws on malformed JSON", () => {
-    expect(() => parseServiceAccountJson("not json")).toThrow();
+  it("drops an entry whose storeIndex is out of range — the model can never invent a URL this way", () => {
+    const result = mapExtractedOffers(JSON.stringify([{ storeIndex: 5, price: 10, currency: "USD" }]), resolved);
+    expect(result).toEqual([]);
   });
 
-  it("throws when required fields are missing", () => {
-    expect(() => parseServiceAccountJson(JSON.stringify({ client_email: "x" }))).toThrow();
-  });
-});
-
-describe("GeminiPriceProvider construction", () => {
-  it("constructs successfully with a valid apiKey", () => {
-    expect(new GeminiPriceProvider({ apiKey: "fake-key" }).name).toBe("gemini");
-  });
-
-  it("constructs successfully with valid credentialsJson", () => {
-    expect(new GeminiPriceProvider({ credentialsJson: FAKE_SA_JSON }).name).toBe("gemini");
-  });
-
-  it("throws when neither credentialsJson nor apiKey is provided", () => {
-    expect(() => new GeminiPriceProvider({})).toThrow();
-  });
-
-  it("throws when credentialsJson is malformed, even if apiKey is also present", () => {
-    expect(() => new GeminiPriceProvider({ credentialsJson: "not json", apiKey: "fake-key" })).toThrow();
-  });
-});
-
-describe("filterGroundedOffers", () => {
-  const groundedUrls = ["https://www.amazon.com/dp/1", "https://www.walmart.com/ip/2", "https://sketchy-deals.example/x"];
-
-  it("keeps an offer whose URL is both grounded and trusted", () => {
-    const result = filterGroundedOffers(
-      [{ store: "Amazon", price: 99.99, url: "https://www.amazon.com/dp/1" }],
-      groundedUrls
-    );
-    expect(result).toEqual([{ store: "Amazon", price: 99.99, url: "https://www.amazon.com/dp/1", currency: "USD" }]);
-  });
-
-  it("drops an offer whose URL is grounded but not on the trusted-vendor allow-list", () => {
-    const result = filterGroundedOffers(
-      [{ store: "Sketchy Deals", price: 10, url: "https://sketchy-deals.example/x" }],
-      groundedUrls
+  it("drops entries with a non-integer or missing storeIndex", () => {
+    const result = mapExtractedOffers(
+      JSON.stringify([{ storeIndex: 0.5, price: 10, currency: "USD" }, { price: 10, currency: "USD" }]),
+      resolved
     );
     expect(result).toEqual([]);
   });
 
-  it("drops an offer whose URL is on a trusted domain but was never grounded (invented by the model)", () => {
-    const result = filterGroundedOffers(
-      [{ store: "Invented", price: 5, url: "https://www.amazon.com/dp/not-in-grounding-chunks" }],
-      groundedUrls
+  it("drops entries with missing or invalid price", () => {
+    const result = mapExtractedOffers(
+      JSON.stringify([
+        { storeIndex: 0, currency: "USD" },
+        { storeIndex: 0, price: -5, currency: "USD" },
+      ]),
+      resolved
     );
     expect(result).toEqual([]);
   });
 
-  it("drops offers with missing or invalid required fields", () => {
-    const result = filterGroundedOffers(
-      [
-        { store: "Missing price", url: "https://www.amazon.com/dp/1" },
-        { store: "Bad price", price: -5, url: "https://www.amazon.com/dp/1" },
-        { price: 10, url: "https://www.amazon.com/dp/1" },
-        { store: "No url", price: 10 },
-      ],
-      groundedUrls
+  it("defaults currency to USD and uppercases a supplied currency", () => {
+    const result = mapExtractedOffers(
+      JSON.stringify([
+        { storeIndex: 0, price: 90 },
+        { storeIndex: 1, price: 90, currency: " eur " },
+      ]),
+      resolved
     );
-    expect(result).toEqual([]);
-  });
-
-  it("returns an empty array when raw offers is not an array", () => {
-    expect(filterGroundedOffers({ store: "x" }, groundedUrls)).toEqual([]);
-    expect(filterGroundedOffers(null, groundedUrls)).toEqual([]);
-  });
-
-  it("uppercases and trims a supplied originalCurrency, defaulting to USD", () => {
-    const result = filterGroundedOffers(
-      [
-        { store: "Amazon", price: 90, url: "https://www.amazon.com/dp/1", originalCurrency: " eur " },
-        { store: "Walmart", price: 90, url: "https://www.walmart.com/ip/2" },
-      ],
-      groundedUrls
-    );
-    expect(result[0].currency).toBe("EUR");
-    expect(result[1].currency).toBe("USD");
+    expect(result[0].currency).toBe("USD");
+    expect(result[1].currency).toBe("EUR");
   });
 
   it("carries through optional shipping and rating when present and valid", () => {
-    const result = filterGroundedOffers(
-      [{ store: "Amazon", price: 90, url: "https://www.amazon.com/dp/1", shipping: "Free Prime shipping", rating: 4.6 }],
-      groundedUrls
+    const result = mapExtractedOffers(
+      JSON.stringify([{ storeIndex: 0, price: 90, currency: "USD", shipping: "Free Prime shipping", rating: 4.6 }]),
+      resolved
     );
     expect(result[0].shipping).toBe("Free Prime shipping");
     expect(result[0].rating).toBe(4.6);
   });
+
+  it("throws on malformed JSON", () => {
+    expect(() => mapExtractedOffers("not json", resolved)).toThrow();
+  });
+
+  it("throws when the response is not a JSON array", () => {
+    expect(() => mapExtractedOffers(JSON.stringify({ storeIndex: 0 }), resolved)).toThrow();
+  });
 });
 
-// Mock the SDK: models.generateContent inspects the request config to decide which
-// canned fixture to return, so this works regardless of call order.
-const groundingFixture = {
-  text: "Amazon has it for $99.99, Walmart has it for $89.99, and Sketchy Deals has it for $10.",
+function jsonResponse(body: unknown): Response {
+  return { ok: true, status: 200, url: "", json: async () => body, body: { cancel: async () => {} } } as unknown as Response;
+}
+
+function redirectResponse(finalUrl: string): Response {
+  return { ok: true, status: 200, url: finalUrl, json: async () => ({}), body: { cancel: async () => {} } } as unknown as Response;
+}
+
+describe("resolveGroundedChunks", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("pre-filters chunks whose title doesn't loosely match a trusted domain, without ever fetching them", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error("fetch should never be called for a pre-filtered chunk");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await resolveGroundedChunks([{ web: { uri: "https://redirect.example/x", title: "sketchy-deals.example" } }]);
+    expect(result).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("resolves a trusted-titled chunk through its redirect to a trusted final URL", async () => {
+    const fetchMock = vi.fn(async () => redirectResponse("https://www.amazon.com/dp/1"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await resolveGroundedChunks([{ web: { uri: "https://redirect.example/abc1", title: "amazon.com" } }]);
+    expect(result).toEqual([{ index: 0, url: "https://www.amazon.com/dp/1", domainLabel: "amazon.com" }]);
+  });
+
+  it("drops a chunk whose title loosely matched but final resolved URL is an untrusted look-alike domain", async () => {
+    const fetchMock = vi.fn(async () => redirectResponse("https://amazon.com.evil.tld/x"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await resolveGroundedChunks([{ web: { uri: "https://redirect.example/abc4", title: "amazon.com" } }]);
+    expect(result).toEqual([]);
+  });
+
+  it("drops a chunk whose redirect resolution throws (network error/timeout)", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error("network error");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await resolveGroundedChunks([{ web: { uri: "https://redirect.example/abc5", title: "walmart.com" } }]);
+    expect(result).toEqual([]);
+  });
+
+  it("assigns stable sequential indices only to chunks that survive filtering, in order", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes("abc1")) return redirectResponse("https://www.amazon.com/dp/1");
+      if (url.includes("abc2")) return redirectResponse("https://www.walmart.com/ip/2");
+      throw new Error(`unexpected url ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await resolveGroundedChunks([
+      { web: { uri: "https://redirect.example/abc1", title: "amazon.com" } },
+      { web: { uri: "https://redirect.example/xyz", title: "sketchy-deals.example" } }, // pre-filtered
+      { web: { uri: "https://redirect.example/abc2", title: "walmart.com" } },
+    ]);
+    expect(result).toEqual([
+      { index: 0, url: "https://www.amazon.com/dp/1", domainLabel: "amazon.com" },
+      { index: 1, url: "https://www.walmart.com/ip/2", domainLabel: "walmart.com" },
+    ]);
+  });
+});
+
+vi.mock("@/lib/providers/vertexAuth", () => ({
+  getAccessToken: vi.fn(async () => "fake-access-token"),
+  getGcpProjectId: vi.fn(() => "fake-project"),
+}));
+
+const call1Fixture = {
   candidates: [
     {
+      content: { parts: [{ text: "Amazon has it for $99.99 and Walmart has it for $89.99." }] },
       groundingMetadata: {
         groundingChunks: [
-          { web: { uri: "https://www.amazon.com/dp/1" } },
-          { web: { uri: "https://www.walmart.com/ip/2" } },
-          { web: { uri: "https://sketchy-deals.example/x" } },
+          { web: { uri: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc1", title: "amazon.com" } },
+          { web: { uri: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc2", title: "walmart.com" } },
+          { web: { uri: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc3", title: "sketchy-deals.example" } },
+          { web: { uri: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc4", title: "amazon.com" } },
+        ],
+        searchEntryPoint: { renderedContent: '<div class="container">attribution widget</div>' },
+      },
+    },
+  ],
+};
+
+const call2Fixture = {
+  candidates: [
+    {
+      content: {
+        parts: [
+          {
+            text: JSON.stringify([
+              { storeIndex: 0, price: 99.99, currency: "USD" },
+              { storeIndex: 1, price: 89.99, currency: "USD" },
+              { storeIndex: 5, price: 1, currency: "USD" }, // out of range — must be dropped
+            ]),
+          },
         ],
       },
     },
   ],
 };
 
-const extractionFixture = {
-  text: JSON.stringify([
-    { store: "Amazon", price: 99.99, url: "https://www.amazon.com/dp/1" },
-    { store: "Walmart", price: 89.99, url: "https://www.walmart.com/ip/2" },
-    // Untrusted domain, even though it was a real grounded citation.
-    { store: "Sketchy Deals", price: 10, url: "https://sketchy-deals.example/x" },
-    // Trusted domain, but this exact URL was never in the grounding chunks.
-    { store: "Invented", price: 5, url: "https://www.amazon.com/dp/invented-not-grounded" },
-  ]),
+const redirectMap: Record<string, string> = {
+  "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc1": "https://www.amazon.com/dp/1",
+  "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc2": "https://www.walmart.com/ip/2",
+  "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc4": "https://amazon.com.evil.tld/x",
 };
 
-const generateContentMock = vi.fn(async (req: { config?: { tools?: unknown; responseMimeType?: string } }) => {
-  if (req.config?.tools) return groundingFixture;
-  if (req.config?.responseMimeType === "application/json") return extractionFixture;
-  throw new Error("Unexpected generateContent call shape in test mock");
-});
+function makeFetchMock() {
+  return vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.includes(":generateContent")) {
+      const bodyStr = typeof init?.body === "string" ? init.body : "";
+      if (bodyStr.includes('"tools"')) return jsonResponse(call1Fixture);
+      if (bodyStr.includes("generationConfig")) return jsonResponse(call2Fixture);
+      throw new Error("Unexpected generateContent call shape in test mock");
+    }
+    const finalUrl = redirectMap[url];
+    if (!finalUrl) {
+      throw new Error(`Unexpected fetch to a URL that should have been pre-filtered: ${url}`);
+    }
+    return redirectResponse(finalUrl);
+  });
+}
 
-vi.mock("@google/genai", () => ({
-  GoogleGenAI: vi.fn().mockImplementation(() => ({
-    models: { generateContent: generateContentMock },
-  })),
-  Type: { ARRAY: "ARRAY", OBJECT: "OBJECT", STRING: "STRING", NUMBER: "NUMBER" },
-}));
+describe("GeminiPriceProvider.search (mocked fetch + vertexAuth)", () => {
+  let fetchMock: ReturnType<typeof makeFetchMock>;
 
-describe("GeminiPriceProvider.search (mocked SDK)", () => {
-  it("returns only offers that are both grounded and trusted, sorted ascending", async () => {
-    const provider = new GeminiPriceProvider({ apiKey: "fake-key" });
+  beforeEach(() => {
+    fetchMock = makeFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns only offers whose URL was actually resolved and trusted, sorted ascending", async () => {
+    const provider = new GeminiPriceProvider("us-central1");
     const offers = await provider.search({ query: "wireless headphones", title: "wireless headphones", confidence: 1 });
 
-    expect(offers.map((o) => o.store)).toEqual(["Walmart", "Amazon"]);
     expect(offers.map((o) => o.url)).toEqual(["https://www.walmart.com/ip/2", "https://www.amazon.com/dp/1"]);
-
-    const groundedUrlSet = new Set(groundingFixture.candidates[0].groundingMetadata.groundingChunks.map((c) => c.web.uri));
-    for (const offer of offers) {
-      expect(groundedUrlSet.has(offer.url)).toBe(true);
+    for (const o of offers) {
+      expect(o.url).not.toContain("vertexaisearch.cloud.google.com");
+      expect(o.url).not.toContain("evil.tld");
     }
   });
 
-  it("throws (so the caller can fall back to mock) when nothing survives filtering", async () => {
-    // Two calls happen in order: grounded search, then structured extraction.
-    generateContentMock.mockImplementationOnce(async () => ({
-      text: "Only found it at an unrecognized site.",
-      candidates: [{ groundingMetadata: { groundingChunks: [{ web: { uri: "https://sketchy-deals.example/x" } }] } }],
-    }));
-    generateContentMock.mockImplementationOnce(async () => ({
-      text: JSON.stringify([{ store: "Sketchy Deals", price: 10, url: "https://sketchy-deals.example/x" }]),
-    }));
+  it("captures the grounding attribution widget from call 1", async () => {
+    const provider = new GeminiPriceProvider("us-central1");
+    await provider.search({ query: "wireless headphones", title: "wireless headphones", confidence: 1 });
+    expect(provider.lastAttributionHtml).toContain("attribution widget");
+  });
 
-    const provider = new GeminiPriceProvider({ apiKey: "fake-key" });
+  it("never fetches the pre-filtered (untrusted-titled) grounding chunk", async () => {
+    const provider = new GeminiPriceProvider("us-central1");
+    await provider.search({ query: "wireless headphones", title: "wireless headphones", confidence: 1 });
+    const fetchedUrls = fetchMock.mock.calls.map((c) => c[0]);
+    expect(fetchedUrls).not.toContain("https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc3");
+  });
+
+  it("throws (so the caller falls back to mock) when no grounding chunks come back", async () => {
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes(":generateContent")) {
+        const bodyStr = typeof init?.body === "string" ? init.body : "";
+        if (bodyStr.includes('"tools"')) {
+          return jsonResponse({ candidates: [{ content: { parts: [{ text: "No results." }] }, groundingMetadata: {} }] });
+        }
+      }
+      throw new Error("unexpected call");
+    });
+
+    const provider = new GeminiPriceProvider("us-central1");
+    await expect(
+      provider.search({ query: "wireless headphones", title: "wireless headphones", confidence: 1 })
+    ).rejects.toThrow();
+  });
+
+  it("throws when every grounded chunk fails to resolve to a trusted URL", async () => {
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes(":generateContent")) {
+        const bodyStr = typeof init?.body === "string" ? init.body : "";
+        if (bodyStr.includes('"tools"')) {
+          return jsonResponse({
+            candidates: [
+              {
+                content: { parts: [{ text: "Only found it at an unrecognized site." }] },
+                groundingMetadata: {
+                  groundingChunks: [{ web: { uri: "https://redirect.example/x", title: "sketchy-deals.example" } }],
+                },
+              },
+            ],
+          });
+        }
+      }
+      throw new Error("unexpected call");
+    });
+
+    const provider = new GeminiPriceProvider("us-central1");
     await expect(
       provider.search({ query: "wireless headphones", title: "wireless headphones", confidence: 1 })
     ).rejects.toThrow();
