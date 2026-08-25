@@ -43,9 +43,11 @@ No separate backend service needed for the MVP; API routes are serverless functi
   anthropic.ts                  # Claude client wrapper (identify + normalize)
   providers/
     types.ts                    # PriceProvider interface, Offer type
-    serpapi.ts                  # Google Shopping via SerpApi (primary)
+    serpapi.ts                  # Google Shopping via SerpApi (highest priority, if key set)
+    gemini.ts                   # Gemini + Google Search grounding (2nd priority, if key set)
     mock.ts                     # deterministic sample data (no-key demo mode)
-    index.ts                    # picks provider based on env, w/ fallback to mock
+    index.ts                    # picks provider based on env: serpapi > gemini > mock
+  trustedVendors.ts             # allow-listed retailer domains + isTrustedVendorUrl()
   currency.ts                   # FX conversion to USD, cached
   cache.ts                      # Upstash Redis client (optional) / in-memory LRU fallback
   ratelimit.ts                  # basic IP-based limiter for /api/*
@@ -84,14 +86,53 @@ type IdentifyResult = {
 
 ## Price source strategy
 
-- **Primary: SerpApi Google Shopping engine.** One licensed API call returns price, seller,
-  and link across many retailers — avoids the legal/fragility risk of scraping individual
-  store HTML. Requires a `SERPAPI_KEY` (has a free trial tier; paid beyond that).
-- **Fallback: mock provider.** If `SERPAPI_KEY` is unset, `lib/providers/index.ts` serves
-  deterministic sample offers and the UI shows a "Demo mode — connect SERPAPI_KEY for live
-  prices" banner. This means the app is fully deployable and demoable with zero paid keys.
-- Provider is behind a common interface (`lib/providers/types.ts`) so a second/alternate
-  source can be added later without touching the API route or UI.
+Provider precedence in `lib/providers/index.ts`: **SerpApi → Gemini → mock**, first
+available key wins. Each is behind the common `PriceProvider` interface
+(`lib/providers/types.ts`) so the API route and UI never know which one answered.
+
+- **1st choice: SerpApi Google Shopping engine.** One licensed API call returns price,
+  seller, and link across many retailers — the most structured, reliable source. Requires
+  `SERPAPI_KEY` (free trial tier, paid beyond that). Not required to run the app.
+- **2nd choice: Gemini + Google Search grounding.** Used when `SERPAPI_KEY` is unset but
+  `GEMINI_API_KEY` is set. Gemini is a general-purpose model, not a shopping API, so this
+  relies specifically on its **Google Search grounding tool**, which returns real, live
+  search-result citations (`groundingMetadata.groundingChunks[].web.uri`) rather than the
+  model's own text. Implementation is a **two-call pattern** (see `lib/providers/gemini.ts`
+  design below), because Gemini does not reliably support combining tool use (grounding)
+  with strict JSON response-schema output in a single call:
+  1. Call `gemini-2.5-flash` (fallback `gemini-2.0-flash` if unavailable in the project)
+     with `tools: [{ googleSearch: {} }]` and a prompt asking it to find current USD prices
+     for the normalized product query at named reputable retailers. Read only the URLs in
+     `groundingMetadata.groundingChunks[].web.uri` — never a URL the model prints in prose,
+     since that could be fabricated.
+  2. Call the model again, no tools, `responseMimeType: "application/json"` with a response
+     schema matching `Offer[]`, passing in call 1's answer text plus the grounded URL list,
+     instructing it to only use URLs from that list.
+  3. Post-process every offer through `isTrustedVendorUrl()` (see Trusted vendors below) and
+     drop anything that doesn't match. If a call fails, times out, or yields zero trusted
+     offers, fall back to the mock provider for that request rather than erroring.
+- **3rd choice / fallback: mock provider.** If neither key is set, `lib/providers/index.ts`
+  serves deterministic sample offers and the UI shows a "Demo mode" banner. This means the
+  app is fully deployable and demoable with zero paid keys.
+
+## Trusted vendors
+
+Every offer's `url`, from any provider, must resolve to an allow-listed retailer domain
+before it's shown to the user — this is what makes "best price" links safe to click rather
+than an arbitrary model- or scrape-sourced URL.
+
+- `lib/trustedVendors.ts` exports `TRUSTED_VENDOR_DOMAINS` (e.g. amazon.com, walmart.com,
+  target.com, bestbuy.com, ebay.com, costco.com, newegg.com, homedepot.com, apple.com,
+  samsung.com, bhphotovideo.com, adorama.com — extend as needed) and
+  `isTrustedVendorUrl(url): boolean`, matching the URL's hostname or any subdomain against
+  the list.
+- The Gemini provider filters through this before returning offers (its links come from
+  open web search, so this is the safety gate). SerpApi and mock data are already scoped to
+  known retailers but should be run through the same helper for consistency and defense in
+  depth.
+- UI: `OfferCard` shows a small "Verified retailer" badge next to the store name when the
+  offer's domain is in the allow-list (in practice, always — untrusted ones are filtered
+  out before they reach the UI, but the badge documents the guarantee to the user).
 
 ## Currency
 
@@ -102,7 +143,8 @@ cached ~1 hour. Offers converted from another currency are labeled ("converted f
 
 ```
 ANTHROPIC_API_KEY=
-SERPAPI_KEY=                    # optional — mock provider used if unset
+SERPAPI_KEY=                    # optional — 1st choice for live prices if set
+GEMINI_API_KEY=                 # optional — 2nd choice (Google Search-grounded pricing) if SERPAPI_KEY unset
 UPSTASH_REDIS_REST_URL=         # optional — in-memory cache used if unset
 UPSTASH_REDIS_REST_TOKEN=       # optional
 NEXT_PUBLIC_APP_NAME=PriceScout
@@ -116,6 +158,8 @@ NEXT_PUBLIC_APP_NAME=PriceScout
   rather than a blank error page.
 - Never log API keys or raw request bodies containing images.
 - Client compresses/resizes images (~1MB cap) before upload.
+- Every displayed offer link must pass `isTrustedVendorUrl()` — no offer from an
+  unrecognized domain reaches the UI, regardless of which provider produced it.
 
 ## Roadmap
 
@@ -123,8 +167,11 @@ NEXT_PUBLIC_APP_NAME=PriceScout
 Input UI (3 tabs), `/api/identify` with Claude, mock price provider, results UI with
 best-price highlight, deployed to Vercel, demo-mode banner.
 
-**Phase 2 — Live pricing**
-Wire real SerpApi provider, currency conversion, caching, empty/error states, rate limiting.
+**Phase 2 — Live pricing (done: SerpApi/mock; in progress: Gemini)**
+SerpApi provider, currency conversion, caching, empty/error states, and rate limiting are
+built and merged. Current work: add the Gemini-grounded provider and the trusted-vendor
+allow-list described above, so the app has live pricing without requiring a paid SerpApi
+signup — then complete the first production deploy to Vercel.
 
 **Phase 3 — Stretch**
 Price-history sparkline (needs a lightweight store, e.g. Supabase, for daily snapshots),
@@ -135,13 +182,18 @@ mobile polish, basic analytics.
 
 - No native mobile app.
 - No user accounts/auth.
-- No direct HTML scraping of retailer sites (ToS/legal risk, fragile) — SerpApi is the
-  price source of record.
+- No direct HTML scraping of retailer sites (ToS/legal risk, fragile). Live prices come
+  only from SerpApi's licensed API or from Gemini's Google Search grounding tool (real
+  citations, not scraped HTML), and only for URLs on the trusted-vendor allow-list.
 
 ## Testing
 
-- Unit tests (Vitest) for the provider abstraction, currency conversion, and query
-  normalization logic.
+- Unit tests (Vitest) for the provider abstraction, currency conversion, query
+  normalization, and `isTrustedVendorUrl()` (including subdomain matches and rejection of
+  look-alike/untrusted domains).
+- Unit test for the Gemini provider's post-processing step using a fixture grounding
+  response (mocked SDK call) — assert untrusted URLs are dropped and the two-call
+  JSON-extraction path only uses URLs present in the fixture's grounding chunks.
 - One Playwright end-to-end test covering the happy path: enter a product name → see a
   sorted results list with a highlighted best price.
 
