@@ -56,5 +56,5 @@ export interface SearchPricesRequestBody {
 }
 
 export type SearchPricesResponseBody =
-  | { ok: true; offers: Offer[]; source: "serpapi" | "vertex-gemini" | "mock"; demoMode: boolean; notice?: string }
+  | { ok: true; offers: Offer[]; source: "serpapi" | "gemini" | "mock"; demoMode: boolean; notice?: string }
   | { ok: false; error: string };

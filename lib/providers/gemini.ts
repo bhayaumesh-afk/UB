@@ -1,208 +1,254 @@
-import crypto from "crypto";
+import { GoogleGenAI, Type } from "@google/genai";
 import type { NormalizedQuery, Offer } from "@/types";
 import { convertToUsd } from "@/lib/currency";
-import { extractJson } from "@/lib/anthropic";
+import { isTrustedVendorUrl, TRUSTED_VENDOR_DOMAINS } from "@/lib/trustedVendors";
 import type { PriceProvider } from "./types";
 
-// Alternative live price source: Gemini on Vertex AI with Google Search grounding,
-// authenticated via a service-account JSON credential. Used when SERPAPI_KEY is not
-// set but GOOGLE_VERTEX_CREDENTIALS_JSON is.
+// Live price source using the official Gemini SDK (Gemini Developer API, driven by
+// GEMINI_API_KEY — not Vertex AI). Gemini is a general-purpose model, not a shopping
+// API, so it must never be trusted to invent prices or URLs from its own knowledge.
+// This uses a two-call pattern:
 //
-// Caveat (confirmed in manual testing): unlike SerpApi's structured Google Shopping
-// feed, this asks a generative model to summarize search results into JSON. It can
-// return the same price for multiple stores, and offer URLs are Google grounding
-// redirect links (vertexaisearch.cloud.google.com/grounding-api-redirect/...) rather
-// than direct retailer URLs. Treat this provider as lower-confidence than SerpApi.
+//   1. Grounded search (tools: googleSearch) — get a natural-language answer plus
+//      real source URLs from groundingMetadata.groundingChunks[].web.uri. URLs are
+//      taken ONLY from that field, never parsed out of the model's prose, since
+//      prose URLs can be fabricated even with grounding enabled.
+//   2. Structured extraction (responseMimeType: application/json, no tools) — turn
+//      call 1's answer into Offer-shaped JSON, constrained to only the URLs found
+//      in call 1. Gemini does not reliably support combining tool use with a
+//      response schema in a single call, hence the split.
+//
+// Every resulting offer must (a) use a URL Gemini actually cited in call 1's
+// grounding chunks and (b) pass isTrustedVendorUrl(). Offers failing either check
+// are dropped. If nothing survives, or either call fails/times out, this throws so
+// the caller falls back to the mock provider rather than showing a fabricated or
+// empty result.
 
-const REQUEST_TIMEOUT_MS = 15000;
-const DEFAULT_LOCATION = "us-central1";
-const DEFAULT_MODEL = "gemini-2.5-flash";
-const TOKEN_TTL_MS = 55 * 60 * 1000; // access tokens last 60min; refresh a bit early
+const PRIMARY_MODEL = "gemini-2.5-flash";
+const FALLBACK_MODEL = "gemini-2.0-flash";
+const CALL_TIMEOUT_MS = 15000;
+const MAX_OFFERS = 8;
 
-interface ServiceAccountCredentials {
-  client_email: string;
-  private_key: string;
-  project_id: string;
-  token_uri: string;
-}
-
-interface TokenCacheEntry {
-  accessToken: string;
-  expiresAt: number;
-}
-
-const tokenCache = new Map<string, TokenCacheEntry>();
-
-function base64url(input: Buffer | string): string {
-  return Buffer.from(input).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function parseCredentials(raw: string): ServiceAccountCredentials {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error("GOOGLE_VERTEX_CREDENTIALS_JSON is not valid JSON");
-  }
-  const obj = parsed as Record<string, unknown>;
-  if (
-    typeof obj.client_email !== "string" ||
-    typeof obj.private_key !== "string" ||
-    typeof obj.project_id !== "string" ||
-    typeof obj.token_uri !== "string"
-  ) {
-    throw new Error("GOOGLE_VERTEX_CREDENTIALS_JSON is missing required service-account fields");
-  }
-  return obj as unknown as ServiceAccountCredentials;
-}
-
-async function getAccessToken(creds: ServiceAccountCredentials): Promise<string> {
-  const cacheKey = creds.client_email;
-  const cached = tokenCache.get(cacheKey);
-  if (cached && Date.now() < cached.expiresAt) {
-    return cached.accessToken;
-  }
-
-  const now = Math.floor(Date.now() / 1000);
-  const header = { alg: "RS256", typ: "JWT" };
-  const claims = {
-    iss: creds.client_email,
-    scope: "https://www.googleapis.com/auth/cloud-platform",
-    aud: creds.token_uri,
-    iat: now,
-    exp: now + 3600,
-  };
-  const unsigned = `${base64url(JSON.stringify(header))}.${base64url(JSON.stringify(claims))}`;
-  const signer = crypto.createSign("RSA-SHA256");
-  signer.update(unsigned);
-  signer.end();
-  const signature = base64url(signer.sign(creds.private_key));
-  const jwt = `${unsigned}.${signature}`;
-
-  const res = await fetch(creds.token_uri, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion: jwt,
-    }),
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
   });
-  if (!res.ok) {
-    throw new Error(`Vertex AI token exchange failed with HTTP ${res.status}`);
-  }
-  const data = (await res.json()) as { access_token?: string };
-  if (!data.access_token) {
-    throw new Error("Vertex AI token exchange response had no access_token");
-  }
-  tokenCache.set(cacheKey, { accessToken: data.access_token, expiresAt: Date.now() + TOKEN_TTL_MS });
-  return data.access_token;
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
+/** True if the error looks like "this model id doesn't exist / isn't available", not a transient failure. */
+function isModelUnavailableError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /not found|not available|unavailable|unsupported model|404/i.test(message);
 }
 
-interface RawOffer {
+interface GroundingChunkLike {
+  web?: { uri?: string };
+}
+
+interface GroundedSearchResult {
+  answerText: string;
+  groundedUrls: string[];
+}
+
+async function runGroundedSearch(
+  ai: GoogleGenAI,
+  model: string,
+  query: NormalizedQuery
+): Promise<GroundedSearchResult> {
+  const prompt = `Search the web for current prices, in USD, of "${query.query}" at reputable online retailers — especially ${TRUSTED_VENDOR_DOMAINS.join(", ")}.
+Report each retailer where you find a real, current price, along with the price and any shipping or rating information you can find.`;
+
+  const response = await withTimeout(
+    ai.models.generateContent({
+      model,
+      contents: prompt,
+      config: { tools: [{ googleSearch: {} }] },
+    }),
+    CALL_TIMEOUT_MS,
+    "Gemini grounded search"
+  );
+
+  const answerText = response.text ?? "";
+  const chunks = (response.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []) as GroundingChunkLike[];
+  const groundedUrls = Array.from(
+    new Set(chunks.map((c) => c.web?.uri).filter((u): u is string => typeof u === "string" && u.length > 0))
+  );
+
+  if (!answerText.trim()) {
+    throw new Error("Gemini grounded search returned no answer text");
+  }
+  return { answerText, groundedUrls };
+}
+
+const offerResponseSchema = {
+  type: Type.ARRAY,
+  items: {
+    type: Type.OBJECT,
+    properties: {
+      store: { type: Type.STRING },
+      price: { type: Type.NUMBER },
+      url: { type: Type.STRING },
+      originalCurrency: { type: Type.STRING },
+      shipping: { type: Type.STRING },
+      rating: { type: Type.NUMBER },
+    },
+    required: ["store", "price", "url"],
+  },
+};
+
+async function runStructuredExtraction(
+  ai: GoogleGenAI,
+  model: string,
+  query: NormalizedQuery,
+  grounded: GroundedSearchResult
+): Promise<unknown> {
+  const prompt = `Product: "${query.query}"
+
+Web search summary:
+${grounded.answerText}
+
+Extract the offers mentioned above as JSON matching the response schema. Rules:
+- The "url" field MUST be copied verbatim from this list — never modify a URL or invent a new one:
+${grounded.groundedUrls.map((u) => `  ${u}`).join("\n")}
+- If a price isn't in USD, set "originalCurrency" to its 3-letter currency code.
+- Only include offers you're actually confident about from the summary above; do not add offers from your own general knowledge.`;
+
+  const response = await withTimeout(
+    ai.models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: offerResponseSchema,
+      },
+    }),
+    CALL_TIMEOUT_MS,
+    "Gemini structured extraction"
+  );
+
+  const text = response.text ?? "";
+  if (!text.trim()) {
+    throw new Error("Gemini structured extraction returned no text");
+  }
+  return JSON.parse(text);
+}
+
+interface RawExtractedOffer {
   store?: unknown;
   price?: unknown;
-  currency?: unknown;
   url?: unknown;
+  originalCurrency?: unknown;
+  shipping?: unknown;
+  rating?: unknown;
 }
 
-/** Exported for unit testing: turns the model's raw JSON text into validated Offer objects (USD conversion applied separately). */
-export function parseOffersFromModelText(text: string): { store: string; price: number; currency: string; url: string }[] {
-  const parsed = extractJson(text);
-  if (!Array.isArray(parsed)) {
-    throw new Error("Model response was not a JSON array");
-  }
-  const offers: { store: string; price: number; currency: string; url: string }[] = [];
-  for (const item of parsed as RawOffer[]) {
-    if (
-      typeof item !== "object" ||
-      item === null ||
-      typeof item.store !== "string" ||
-      typeof item.price !== "number" ||
-      !(item.price > 0) ||
-      typeof item.url !== "string"
-    ) {
-      continue;
-    }
-    offers.push({
+interface ValidatedOffer {
+  store: string;
+  price: number;
+  url: string;
+  currency: string;
+  shipping?: string;
+  rating?: number;
+}
+
+/**
+ * Exported for unit testing: validates and filters raw extracted offers down to
+ * ones that (a) use a URL actually present in call 1's grounding chunks — never
+ * one Gemini invented — and (b) resolve to an allow-listed retailer domain.
+ */
+export function filterGroundedOffers(rawOffers: unknown, groundedUrls: string[]): ValidatedOffer[] {
+  if (!Array.isArray(rawOffers)) return [];
+  const groundedSet = new Set(groundedUrls);
+  const results: ValidatedOffer[] = [];
+
+  for (const item of rawOffers as RawExtractedOffer[]) {
+    if (typeof item !== "object" || item === null) continue;
+    if (typeof item.store !== "string" || item.store.trim().length === 0) continue;
+    if (typeof item.price !== "number" || !(item.price > 0)) continue;
+    if (typeof item.url !== "string") continue;
+    if (!groundedSet.has(item.url)) continue; // must be a real grounded citation, not invented
+    if (!isTrustedVendorUrl(item.url)) continue; // must resolve to an allow-listed retailer
+
+    results.push({
       store: item.store,
       price: item.price,
-      currency: typeof item.currency === "string" ? item.currency : "USD",
       url: item.url,
+      currency:
+        typeof item.originalCurrency === "string" && item.originalCurrency.trim().length > 0
+          ? item.originalCurrency.trim().toUpperCase()
+          : "USD",
+      shipping: typeof item.shipping === "string" ? item.shipping : undefined,
+      rating: typeof item.rating === "number" ? item.rating : undefined,
     });
   }
-  return offers;
+
+  return results;
 }
 
-export class VertexGeminiPriceProvider implements PriceProvider {
-  readonly name = "vertex-gemini" as const;
-  private readonly credentials: ServiceAccountCredentials;
-  private readonly location: string;
-  private readonly model: string;
+export class GeminiPriceProvider implements PriceProvider {
+  readonly name = "gemini" as const;
+  private readonly ai: GoogleGenAI;
 
-  constructor(credentialsJson: string, location?: string, model?: string) {
-    this.credentials = parseCredentials(credentialsJson);
-    this.location = location && location.trim() ? location : DEFAULT_LOCATION;
-    this.model = model && model.trim() ? model : DEFAULT_MODEL;
+  constructor(apiKey: string) {
+    this.ai = new GoogleGenAI({ apiKey });
   }
 
-  async search(query: NormalizedQuery): Promise<Offer[]> {
-    const accessToken = await getAccessToken(this.credentials);
-    const url = `https://${this.location}-aiplatform.googleapis.com/v1/projects/${this.credentials.project_id}/locations/${this.location}/publishers/google/models/${this.model}:generateContent`;
-
-    const prompt = `Search the web for current real prices of "${query.query}" from at least 3 different online retailers.
-Use distinct, accurate, current prices per retailer — do not repeat the same price across stores unless you have confirmed they genuinely match.
-Respond with ONLY a JSON array (no markdown fences, no prose) of objects shaped like:
-[{"store": string, "price": number, "currency": string, "url": string}]`;
-
-    const res = await fetchWithTimeout(
-      url,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          tools: [{ googleSearch: {} }],
-        }),
-      },
-      REQUEST_TIMEOUT_MS
-    );
-
-    if (!res.ok) {
-      throw new Error(`Vertex AI generateContent failed with HTTP ${res.status}`);
-    }
-    const data = await res.json();
-    const textPart = data?.candidates?.[0]?.content?.parts?.find((p: { text?: string }) => typeof p.text === "string");
-    if (!textPart?.text) {
-      throw new Error("Vertex AI response had no text content");
+  private async searchWithModel(model: string, query: NormalizedQuery): Promise<Offer[]> {
+    const grounded = await runGroundedSearch(this.ai, model, query);
+    if (grounded.groundedUrls.length === 0) {
+      throw new Error("Gemini grounded search returned no source URLs");
     }
 
-    const rawOffers = parseOffersFromModelText(textPart.text);
+    const rawExtracted = await runStructuredExtraction(this.ai, model, query, grounded);
+    const validated = filterGroundedOffers(rawExtracted, grounded.groundedUrls);
+    if (validated.length === 0) {
+      throw new Error("No trusted, grounded offers survived filtering");
+    }
+
     const offers: Offer[] = [];
-    for (const raw of rawOffers) {
+    for (const v of validated) {
       try {
-        const conversion = await convertToUsd(raw.price, raw.currency);
+        const conversion = await convertToUsd(v.price, v.currency);
         offers.push({
-          store: raw.store,
+          store: v.store,
           price: Math.round(conversion.amountUsd * 100) / 100,
-          originalCurrency: conversion.converted ? raw.currency.toUpperCase() : undefined,
-          originalPrice: conversion.converted ? raw.price : undefined,
-          url: raw.url,
+          originalCurrency: conversion.converted ? v.currency : undefined,
+          originalPrice: conversion.converted ? v.price : undefined,
+          url: v.url,
+          shipping: v.shipping,
+          rating: v.rating,
         });
       } catch {
         // Skip offers whose currency can't be converted rather than showing a wrong price.
       }
     }
 
-    return offers.sort((a, b) => a.price - b.price);
+    if (offers.length === 0) {
+      throw new Error("No offers survived currency conversion");
+    }
+
+    return offers.sort((a, b) => a.price - b.price).slice(0, MAX_OFFERS);
+  }
+
+  async search(query: NormalizedQuery): Promise<Offer[]> {
+    try {
+      return await this.searchWithModel(PRIMARY_MODEL, query);
+    } catch (err) {
+      if (!isModelUnavailableError(err)) {
+        throw err;
+      }
+      // Primary model id unavailable in this project/region — retry once with the coded fallback.
+      return await this.searchWithModel(FALLBACK_MODEL, query);
+    }
   }
 }
