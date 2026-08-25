@@ -42,7 +42,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SearchPricesR
   const cacheKey = normalizeQueryForCacheKey(body.query);
   const demoMode = isDemoMode();
 
-  const cached = await cacheGet<{ offers: Offer[]; source: "serpapi" | "mock" }>(cacheKey);
+  const cached = await cacheGet<{ offers: Offer[]; source: "serpapi" | "vertex-gemini" | "mock" }>(cacheKey);
   if (cached) {
     return NextResponse.json({
       ok: true,
@@ -51,18 +51,21 @@ export async function POST(req: NextRequest): Promise<NextResponse<SearchPricesR
       demoMode,
       notice: demoMode
         ? "Demo mode — connect SERPAPI_KEY for live prices. Showing sample offers."
-        : undefined,
+        : cached.source === "vertex-gemini"
+          ? "Prices estimated by AI web search (Gemini) — verify at the retailer before buying."
+          : undefined,
     });
   }
 
   const provider = getPriceProvider();
+  const isLiveProvider = provider.name !== "mock";
   let offers: Offer[];
-  let source: "serpapi" | "mock" = provider.name;
+  let source: "serpapi" | "vertex-gemini" | "mock" = provider.name;
   let notice: string | undefined;
 
   try {
     offers = await provider.search(normalizedQuery);
-    if (offers.length === 0 && provider.name === "serpapi") {
+    if (offers.length === 0 && isLiveProvider) {
       throw new Error("No live offers found");
     }
   } catch (err) {
@@ -70,12 +73,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<SearchPricesR
     // Graceful degradation: never show a blank error page — fall back to mock data.
     offers = await mockProvider.search(normalizedQuery);
     source = "mock";
-    notice =
-      provider.name === "serpapi"
-        ? "Live price search is temporarily unavailable — showing sample offers instead."
-        : "Demo mode — connect SERPAPI_KEY for live prices. Showing sample offers.";
+    notice = isLiveProvider
+      ? "Live price search is temporarily unavailable — showing sample offers instead."
+      : "Demo mode — connect SERPAPI_KEY for live prices. Showing sample offers.";
   }
 
+  if (!notice && source === "vertex-gemini") {
+    notice = "Prices estimated by AI web search (Gemini) — verify at the retailer before buying.";
+  }
   if (!notice && demoMode) {
     notice = "Demo mode — connect SERPAPI_KEY for live prices. Showing sample offers.";
   }
