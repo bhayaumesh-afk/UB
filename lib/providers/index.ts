@@ -10,11 +10,10 @@ function hasValue(value: string | undefined): boolean {
 /**
  * Selects the active price provider, in priority order:
  * 1. SerpApi (SERPAPI_KEY) — structured Google Shopping feed, most reliable.
- * 2. Gemini + Google Search grounding — live pricing with no paid signup required,
- *    used when SerpApi isn't configured. Authenticates via GOOGLE_VERTEX_CREDENTIALS_JSON
- *    (Vertex AI service account, takes priority if both are set) or GEMINI_API_KEY
- *    (Gemini Developer API key). Offer links are filtered through the trusted-vendor
- *    allow-list (see lib/trustedVendors.ts).
+ * 2. Gemini on Vertex AI + Google Search grounding (GCP_SERVICE_ACCOUNT_JSON) — live
+ *    pricing with no paid SerpApi signup required, used when SerpApi isn't configured.
+ *    Offer links are resolved and filtered through the trusted-vendor allow-list
+ *    (see lib/trustedVendors.ts and lib/providers/gemini.ts).
  * 3. Deterministic mock provider (demo mode).
  */
 export function getPriceProvider(env: NodeJS.ProcessEnv = process.env): PriceProvider {
@@ -22,21 +21,15 @@ export function getPriceProvider(env: NodeJS.ProcessEnv = process.env): PricePro
   if (hasValue(serpKey)) {
     return new SerpApiPriceProvider(serpKey!);
   }
-  const credentialsJson = env.GOOGLE_VERTEX_CREDENTIALS_JSON;
-  const geminiApiKey = env.GEMINI_API_KEY;
-  if (hasValue(credentialsJson) || hasValue(geminiApiKey)) {
-    return new GeminiPriceProvider({
-      credentialsJson: hasValue(credentialsJson) ? credentialsJson : undefined,
-      apiKey: hasValue(geminiApiKey) ? geminiApiKey : undefined,
-      location: env.GOOGLE_VERTEX_LOCATION,
-    });
+  if (hasValue(env.GCP_SERVICE_ACCOUNT_JSON)) {
+    return new GeminiPriceProvider(env.GCP_VERTEX_LOCATION);
   }
   return mockProvider;
 }
 
 export function isDemoMode(env: NodeJS.ProcessEnv = process.env): boolean {
   const hasSerp = hasValue(env.SERPAPI_KEY);
-  const hasGemini = hasValue(env.GOOGLE_VERTEX_CREDENTIALS_JSON) || hasValue(env.GEMINI_API_KEY);
+  const hasGemini = hasValue(env.GCP_SERVICE_ACCOUNT_JSON);
   return !hasSerp && !hasGemini;
 }
 

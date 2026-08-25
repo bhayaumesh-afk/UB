@@ -24,36 +24,33 @@ describe("provider selection", () => {
     expect(isDemoMode({ SERPAPI_KEY: "abc123" } as unknown as NodeJS.ProcessEnv)).toBe(false);
   });
 
-  it("selects the Gemini provider when only GEMINI_API_KEY is set", () => {
-    const provider = getPriceProvider({ GEMINI_API_KEY: "gk-abc123" } as unknown as NodeJS.ProcessEnv);
+  it("selects the Gemini provider when only GCP_SERVICE_ACCOUNT_JSON is set", () => {
+    const env = { GCP_SERVICE_ACCOUNT_JSON: '{"client_email":"x","private_key":"y","project_id":"z"}' } as unknown as NodeJS.ProcessEnv;
+    const provider = getPriceProvider(env);
     expect(provider.name).toBe("gemini");
     expect(provider).toBeInstanceOf(GeminiPriceProvider);
-    expect(isDemoMode({ GEMINI_API_KEY: "gk-abc123" } as unknown as NodeJS.ProcessEnv)).toBe(false);
+    expect(isDemoMode(env)).toBe(false);
   });
 
-  it("selects the Gemini provider when only GOOGLE_VERTEX_CREDENTIALS_JSON is set", () => {
-    const fakeSaJson = JSON.stringify({
-      client_email: "test@example.iam.gserviceaccount.com",
-      private_key: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
-      project_id: "test-project",
-    });
-    const provider = getPriceProvider({ GOOGLE_VERTEX_CREDENTIALS_JSON: fakeSaJson } as unknown as NodeJS.ProcessEnv);
-    expect(provider.name).toBe("gemini");
-    expect(provider).toBeInstanceOf(GeminiPriceProvider);
-    expect(isDemoMode({ GOOGLE_VERTEX_CREDENTIALS_JSON: fakeSaJson } as unknown as NodeJS.ProcessEnv)).toBe(false);
-  });
-
-  it("falls back to the mock provider when GEMINI_API_KEY is empty", () => {
-    const provider = getPriceProvider({ GEMINI_API_KEY: "  " } as unknown as NodeJS.ProcessEnv);
+  it("falls back to the mock provider when GCP_SERVICE_ACCOUNT_JSON is empty", () => {
+    const provider = getPriceProvider({ GCP_SERVICE_ACCOUNT_JSON: "  " } as unknown as NodeJS.ProcessEnv);
     expect(provider.name).toBe("mock");
   });
 
   it("prefers SerpApi over Gemini when both are configured", () => {
     const provider = getPriceProvider({
       SERPAPI_KEY: "abc123",
-      GEMINI_API_KEY: "gk-abc123",
+      GCP_SERVICE_ACCOUNT_JSON: '{"client_email":"x","private_key":"y","project_id":"z"}',
     } as unknown as NodeJS.ProcessEnv);
     expect(provider.name).toBe("serpapi");
+  });
+
+  it("does not eagerly parse or validate GCP_SERVICE_ACCOUNT_JSON at construction time", () => {
+    // Malformed credential JSON should not throw until the provider actually searches
+    // (see vertexAuth.test.ts) — constructing it is just a config-driven selection.
+    expect(() =>
+      getPriceProvider({ GCP_SERVICE_ACCOUNT_JSON: "not valid json" } as unknown as NodeJS.ProcessEnv)
+    ).not.toThrow();
   });
 });
 

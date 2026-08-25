@@ -9,6 +9,7 @@ import CandidateChooser from "@/components/CandidateChooser";
 import DemoModeBanner from "@/components/DemoModeBanner";
 import BestPriceCard from "@/components/BestPriceCard";
 import OfferList from "@/components/OfferList";
+import SearchAttribution from "@/components/SearchAttribution";
 import type {
   IdentifyCandidate,
   IdentifyResponseBody,
@@ -30,6 +31,7 @@ export default function HomePage() {
   const [identifiedTitle, setIdentifiedTitle] = useState<string | null>(null);
   const [offers, setOffers] = useState<Offer[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
+  const [attributionHtml, setAttributionHtml] = useState<string | null>(null);
 
   function resetResults() {
     setErrorMessage(null);
@@ -37,6 +39,7 @@ export default function HomePage() {
     setIdentifiedTitle(null);
     setOffers([]);
     setNotice(null);
+    setAttributionHtml(null);
   }
 
   async function runSearch(query: NormalizedQuery) {
@@ -56,6 +59,7 @@ export default function HomePage() {
       }
       setOffers(data.offers);
       setNotice(data.notice ?? null);
+      setAttributionHtml(data.attributionHtml ?? null);
       setPhase("results");
     } catch {
       setErrorMessage("Could not reach the price search service. Please try again.");
@@ -179,6 +183,7 @@ export default function HomePage() {
             </p>
           )}
           {notice && <DemoModeBanner message={notice} />}
+          {attributionHtml && <SearchAttribution html={attributionHtml} />}
           {bestOffer ? (
             <>
               <BestPriceCard offer={bestOffer} />
