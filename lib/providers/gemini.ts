@@ -2,6 +2,7 @@ import type { NormalizedQuery, Offer } from "@/types";
 import { convertToUsd } from "@/lib/currency";
 import { isTrustedVendorUrl, TRUSTED_VENDOR_DOMAINS } from "@/lib/trustedVendors";
 import { getAccessToken, getGcpProjectId } from "./vertexAuth";
+import { callVertexGenerateContent, extractText, fetchWithTimeout, type GroundingChunk } from "./vertexRest";
 import type { PriceProvider } from "./types";
 
 // Live price source: Gemini on Vertex AI, called directly via fetch against the REST
@@ -38,70 +39,6 @@ const CALL_TIMEOUT_MS = 15000;
 const RESOLVE_TIMEOUT_MS = 5000;
 const MAX_OFFERS = 8;
 const DEFAULT_LOCATION = "us-central1";
-
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-interface GenerateContentPart {
-  text?: string;
-}
-
-interface GenerateContentCandidate {
-  content?: { parts?: GenerateContentPart[] };
-  groundingMetadata?: {
-    groundingChunks?: GroundingChunk[];
-    searchEntryPoint?: { renderedContent?: string };
-  };
-}
-
-interface GenerateContentResponse {
-  candidates?: GenerateContentCandidate[];
-}
-
-async function callVertexGenerateContent(
-  location: string,
-  projectId: string,
-  accessToken: string,
-  body: unknown
-): Promise<GenerateContentResponse> {
-  const endpoint = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${MODEL}:generateContent`;
-  const res = await fetchWithTimeout(
-    endpoint,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-    CALL_TIMEOUT_MS
-  );
-  if (!res.ok) {
-    throw new Error(`Vertex AI generateContent failed with HTTP ${res.status}`);
-  }
-  return res.json();
-}
-
-function extractText(response: GenerateContentResponse): string {
-  const parts = response.candidates?.[0]?.content?.parts ?? [];
-  return parts
-    .filter((p): p is { text: string } => typeof p.text === "string")
-    .map((p) => p.text)
-    .join("");
-}
-
-interface GroundingChunkWeb {
-  uri?: string;
-  title?: string;
-}
-interface GroundingChunk {
-  web?: GroundingChunkWeb;
-}
 
 export interface ResolvedChunk {
   index: number;
@@ -263,10 +200,17 @@ export class GeminiPriceProvider implements PriceProvider {
     const searchPrompt = `Search the web for current prices, in USD, of "${query.query}" at reputable online retailers — especially ${TRUSTED_VENDOR_DOMAINS.join(", ")}.
 Report each retailer where you find a real, current price, along with the price and any shipping or rating information you can find.`;
 
-    const call1 = await callVertexGenerateContent(this.location, projectId, accessToken, {
-      contents: [{ role: "user", parts: [{ text: searchPrompt }] }],
-      tools: [{ googleSearch: {} }],
-    });
+    const call1 = await callVertexGenerateContent(
+      MODEL,
+      this.location,
+      projectId,
+      accessToken,
+      {
+        contents: [{ role: "user", parts: [{ text: searchPrompt }] }],
+        tools: [{ googleSearch: {} }],
+      },
+      CALL_TIMEOUT_MS
+    );
 
     const groundingMetadata = call1?.candidates?.[0]?.groundingMetadata;
     const chunks: GroundingChunk[] = groundingMetadata?.groundingChunks ?? [];
@@ -285,13 +229,20 @@ Report each retailer where you find a real, current price, along with the price 
       throw new Error("No grounded citation resolved to a trusted retailer URL");
     }
 
-    const call2 = await callVertexGenerateContent(this.location, projectId, accessToken, {
-      contents: [{ role: "user", parts: [{ text: buildExtractionPrompt(answerText, resolved) }] }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: OFFER_RESPONSE_SCHEMA,
+    const call2 = await callVertexGenerateContent(
+      MODEL,
+      this.location,
+      projectId,
+      accessToken,
+      {
+        contents: [{ role: "user", parts: [{ text: buildExtractionPrompt(answerText, resolved) }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: OFFER_RESPONSE_SCHEMA,
+        },
       },
-    });
+      CALL_TIMEOUT_MS
+    );
 
     const call2Text = extractText(call2);
     if (!call2Text.trim()) {

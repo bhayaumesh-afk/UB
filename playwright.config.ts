@@ -23,10 +23,10 @@ export default defineConfig({
     timeout: 180 * 1000,
     env: {
       // Force demo/mock mode for deterministic e2e results, no live keys required.
-      // With ANTHROPIC_API_KEY unset, /api/identify uses the heuristic text
+      // With GCP_SERVICE_ACCOUNT_JSON unset, /api/identify uses the heuristic text
       // fallback; with SERPAPI_KEY unset, /api/search-prices uses mock offers.
       SERPAPI_KEY: "",
-      ANTHROPIC_API_KEY: "",
+      GCP_SERVICE_ACCOUNT_JSON: "",
     },
   },
 });
