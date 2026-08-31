@@ -1,21 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractJson, normalizeHeuristically, toNormalizedQuery } from "@/lib/anthropic";
-
-describe("extractJson", () => {
-  it("parses a raw JSON object", () => {
-    expect(extractJson('{"query":"foo"}')).toEqual({ query: "foo" });
-  });
-
-  it("parses JSON wrapped in markdown code fences", () => {
-    const text = '```json\n{"query":"foo","confidence":0.9}\n```';
-    expect(extractJson(text)).toEqual({ query: "foo", confidence: 0.9 });
-  });
-
-  it("parses JSON wrapped in plain code fences", () => {
-    const text = '```\n{"query":"foo"}\n```';
-    expect(extractJson(text)).toEqual({ query: "foo" });
-  });
-});
+import { normalizeHeuristically, toNormalizedQuery } from "@/lib/identify";
 
 describe("toNormalizedQuery", () => {
   it("maps required fields and defaults confidence when valid", () => {
@@ -53,13 +37,7 @@ describe("toNormalizedQuery", () => {
       query: "x",
       title: "x",
       confidence: 0.3,
-      candidates: [
-        { title: "A" },
-        { title: "B" },
-        { title: "" },
-        { title: "C" },
-        { title: "D" },
-      ],
+      candidates: [{ title: "A" }, { title: "B" }, { title: "" }, { title: "C" }, { title: "D" }],
     });
     expect(result.candidates).toHaveLength(3);
     expect(result.candidates?.map((c) => c.title)).toEqual(["A", "B", "C"]);
