@@ -10,9 +10,14 @@ sorted low-to-high, with a direct "buy" link.
 
 1. User picks one of three input tabs: Image / Name / Description.
 2. Frontend sends the input to `POST /api/identify`.
-   - Image or description → Claude (vision-capable, `claude-sonnet-5`) extracts a normalized
-     product query: `{ title, brand?, category?, confidence, candidates?[] }`.
-   - Name → light normalization pass (typo/brand cleanup) through the same endpoint.
+   - Image or description → Gemini on Vertex AI (same `GCP_SERVICE_ACCOUNT_JSON` credential
+     used for pricing, `gemini-2.5-flash`, single call with a JSON response schema — no
+     search grounding involved here, so none of the two-call/citation machinery pricing
+     needs applies) extracts a normalized product query:
+     `{ title, brand?, category?, confidence, candidates?[] }`. Gemini fully replaces
+     Claude/Anthropic for identification — there is no `ANTHROPIC_API_KEY` in this app.
+   - Name → light normalization pass (typo/brand cleanup) through the same endpoint, with a
+     zero-AI heuristic fallback if the Gemini call fails or the credential is unset.
    - If confidence is low, the UI shows up to 3 candidate matches for the user to pick from
      before searching prices.
 3. Frontend sends the normalized query to `POST /api/search-prices`.
@@ -163,17 +168,21 @@ cached ~1 hour. Offers converted from another currency are labeled ("converted f
 ## Environment variables (`.env.example`)
 
 ```
-ANTHROPIC_API_KEY=
 SERPAPI_KEY=                    # optional — 1st choice for live prices if set
-GCP_SERVICE_ACCOUNT_JSON=       # optional — 2nd choice: Vertex AI Gemini w/ Google Search
-                                 # grounding if SERPAPI_KEY unset. Full service-account key
-                                 # JSON as one line (minify with `jq -c .` before pasting).
+GCP_SERVICE_ACCOUNT_JSON=       # powers identification (image/name/description, replacing
+                                 # Claude entirely) AND is the 2nd-choice live price source
+                                 # (Vertex AI Gemini w/ Google Search grounding) if
+                                 # SERPAPI_KEY is unset. Full service-account key JSON as
+                                 # one line (minify with `jq -c .` before pasting).
 GCP_VERTEX_LOCATION=             # required alongside GCP_SERVICE_ACCOUNT_JSON — reuse the
                                  # region already proven working in this project's auth test
 UPSTASH_REDIS_REST_URL=         # optional — in-memory cache used if unset
 UPSTASH_REDIS_REST_TOKEN=       # optional
 NEXT_PUBLIC_APP_NAME=PriceScout
 ```
+
+There is no `ANTHROPIC_API_KEY` in this app — Gemini/Vertex AI (via
+`GCP_SERVICE_ACCOUNT_JSON`) is the sole AI provider, for both identification and pricing.
 
 `GCP_SERVICE_ACCOUNT_JSON` is a broader credential than a plain API key (it's scoped by
 whatever IAM roles are bound to that service account) — treat it with at least the same
@@ -195,14 +204,16 @@ not a broad/owner role.
 ## Roadmap
 
 **Phase 1 — MVP (demo-deployable with zero paid keys)**
-Input UI (3 tabs), `/api/identify` with Claude, mock price provider, results UI with
-best-price highlight, deployed to Vercel, demo-mode banner.
+Input UI (3 tabs), `/api/identify` (originally Claude, since replaced — see Phase 2), mock
+price provider, results UI with best-price highlight, demo-mode banner.
 
-**Phase 2 — Live pricing (done: SerpApi/mock; in progress: Gemini)**
+**Phase 2 — Live pricing + Gemini identification (in progress)**
 SerpApi provider, currency conversion, caching, empty/error states, and rate limiting are
-built and merged. Current work: add the Gemini-grounded provider and the trusted-vendor
-allow-list described above, so the app has live pricing without requiring a paid SerpApi
-signup — then complete the first production deploy to Vercel.
+built and merged. The Gemini-grounded pricing provider and trusted-vendor allow-list are
+merged. Current work: replace Claude with Gemini/Vertex AI (same service-account
+credential) for identification too, so the app has a single AI provider end to end with no
+`ANTHROPIC_API_KEY` dependency. Production deployment (Vercel) is intentionally deferred —
+not in scope right now; verification happens via local preview only.
 
 **Phase 3 — Stretch**
 Price-history sparkline (needs a lightweight store, e.g. Supabase, for daily snapshots),
@@ -230,8 +241,8 @@ mobile polish, basic analytics.
 
 ## Deployment
 
-- Vercel project connected to this repo/branch.
-- Env vars set in Vercel project settings (see `.env.example`).
-- `ANTHROPIC_API_KEY` required for identification; everything else optional (app degrades
-  to demo mode without it, except identification itself needs the Anthropic key to function
-  — without it, the Name/Description tabs can still do a naive pass-through search).
+Deferred — not currently in scope. The app is verified via local preview
+(`npm run dev` + a headless-browser screenshot pass across all three input tabs) rather than
+a production deploy. When deployment resumes, `docs/PLAN.md` should be updated with the
+target platform and required env vars at that time (see `.env.example` for what's currently
+needed to run it locally).
