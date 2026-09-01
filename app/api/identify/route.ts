@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { identifyProduct, normalizeHeuristically } from "@/lib/anthropic";
+import { identifyProduct, normalizeHeuristically } from "@/lib/identify";
 import { checkRateLimit, getClientIp } from "@/lib/ratelimit";
 import type { IdentifyRequestBody, IdentifyResponseBody } from "@/types";
 
@@ -32,17 +32,20 @@ export async function POST(req: NextRequest): Promise<NextResponse<IdentifyRespo
     return NextResponse.json({ ok: false, error: "Image is too large" }, { status: 413 });
   }
 
-  const hasAnthropicKey = Boolean(process.env.ANTHROPIC_API_KEY);
+  const hasGeminiCredential = Boolean(process.env.GCP_SERVICE_ACCOUNT_JSON);
 
-  if (body.mode === "image" && !hasAnthropicKey) {
+  if (body.mode === "image" && !hasGeminiCredential) {
     return NextResponse.json(
-      { ok: false, error: "Server is not configured with ANTHROPIC_API_KEY, which is required to identify products from a photo." },
+      {
+        ok: false,
+        error: "Server is not configured with GCP_SERVICE_ACCOUNT_JSON, which is required to identify products from a photo.",
+      },
       { status: 503 }
     );
   }
 
   try {
-    const result = hasAnthropicKey ? await identifyProduct(body) : normalizeHeuristically(body);
+    const result = hasGeminiCredential ? await identifyProduct(body) : normalizeHeuristically(body);
     return NextResponse.json({ ok: true, result });
   } catch (err) {
     // Never log raw image payloads or API keys — just the error message.

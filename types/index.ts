@@ -56,5 +56,13 @@ export interface SearchPricesRequestBody {
 }
 
 export type SearchPricesResponseBody =
-  | { ok: true; offers: Offer[]; source: "serpapi" | "mock"; demoMode: boolean; notice?: string }
+  | {
+      ok: true;
+      offers: Offer[];
+      source: "serpapi" | "gemini" | "mock";
+      demoMode: boolean;
+      notice?: string;
+      /** Google Search grounding attribution widget (HTML/CSS), present only when source === "gemini". Required by Google's grounding terms wherever these results are shown. */
+      attributionHtml?: string;
+    }
   | { ok: false; error: string };

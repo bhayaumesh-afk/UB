@@ -1,4 +1,5 @@
 import type { Offer } from "@/types";
+import VerifiedRetailerBadge from "./VerifiedRetailerBadge";
 
 export default function BestPriceCard({ offer }: { offer: Offer }) {
   return (
@@ -12,9 +13,12 @@ export default function BestPriceCard({ offer }: { offer: Offer }) {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <div className="text-3xl font-bold text-slate-900">${offer.price.toFixed(2)}</div>
-          <div className="mt-1 text-sm text-slate-600">
-            at <span className="font-medium">{offer.store}</span>
-            {offer.shipping ? ` · ${offer.shipping}` : ""}
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-slate-600">
+            <span>
+              at <span className="font-medium">{offer.store}</span>
+              {offer.shipping ? ` · ${offer.shipping}` : ""}
+            </span>
+            <VerifiedRetailerBadge url={offer.url} />
           </div>
           {offer.originalCurrency && (
             <div className="mt-1 text-xs text-slate-500">

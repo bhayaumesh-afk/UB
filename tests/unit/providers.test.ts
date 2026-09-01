@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import { getPriceProvider, isDemoMode } from "@/lib/providers";
 import { mockProvider, selectMockCategory } from "@/lib/providers/mock";
 import { SerpApiPriceProvider } from "@/lib/providers/serpapi";
+import { GeminiPriceProvider } from "@/lib/providers/gemini";
 import type { NormalizedQuery } from "@/types";
 
 describe("provider selection", () => {
-  it("falls back to the mock provider when SERPAPI_KEY is unset", () => {
+  it("falls back to the mock provider when nothing is configured", () => {
     const provider = getPriceProvider({} as unknown as NodeJS.ProcessEnv);
     expect(provider.name).toBe("mock");
     expect(isDemoMode({} as unknown as NodeJS.ProcessEnv)).toBe(true);
@@ -21,6 +22,35 @@ describe("provider selection", () => {
     expect(provider.name).toBe("serpapi");
     expect(provider).toBeInstanceOf(SerpApiPriceProvider);
     expect(isDemoMode({ SERPAPI_KEY: "abc123" } as unknown as NodeJS.ProcessEnv)).toBe(false);
+  });
+
+  it("selects the Gemini provider when only GCP_SERVICE_ACCOUNT_JSON is set", () => {
+    const env = { GCP_SERVICE_ACCOUNT_JSON: '{"client_email":"x","private_key":"y","project_id":"z"}' } as unknown as NodeJS.ProcessEnv;
+    const provider = getPriceProvider(env);
+    expect(provider.name).toBe("gemini");
+    expect(provider).toBeInstanceOf(GeminiPriceProvider);
+    expect(isDemoMode(env)).toBe(false);
+  });
+
+  it("falls back to the mock provider when GCP_SERVICE_ACCOUNT_JSON is empty", () => {
+    const provider = getPriceProvider({ GCP_SERVICE_ACCOUNT_JSON: "  " } as unknown as NodeJS.ProcessEnv);
+    expect(provider.name).toBe("mock");
+  });
+
+  it("prefers SerpApi over Gemini when both are configured", () => {
+    const provider = getPriceProvider({
+      SERPAPI_KEY: "abc123",
+      GCP_SERVICE_ACCOUNT_JSON: '{"client_email":"x","private_key":"y","project_id":"z"}',
+    } as unknown as NodeJS.ProcessEnv);
+    expect(provider.name).toBe("serpapi");
+  });
+
+  it("does not eagerly parse or validate GCP_SERVICE_ACCOUNT_JSON at construction time", () => {
+    // Malformed credential JSON should not throw until the provider actually searches
+    // (see vertexAuth.test.ts) — constructing it is just a config-driven selection.
+    expect(() =>
+      getPriceProvider({ GCP_SERVICE_ACCOUNT_JSON: "not valid json" } as unknown as NodeJS.ProcessEnv)
+    ).not.toThrow();
   });
 });
 
