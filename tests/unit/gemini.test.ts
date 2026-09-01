@@ -1,5 +1,12 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { mapExtractedOffers, resolveGroundedChunks, GeminiPriceProvider, type ResolvedChunk } from "@/lib/providers/gemini";
+import {
+  mapExtractedOffers,
+  resolveGroundedChunks,
+  filterImplausiblePrices,
+  GeminiPriceProvider,
+  type ResolvedChunk,
+} from "@/lib/providers/gemini";
+import type { Offer } from "@/types";
 
 describe("mapExtractedOffers", () => {
   const resolved: ResolvedChunk[] = [
@@ -275,5 +282,46 @@ describe("GeminiPriceProvider.search (mocked fetch + vertexAuth)", () => {
     await expect(
       provider.search({ query: "wireless headphones", title: "wireless headphones", confidence: 1 })
     ).rejects.toThrow();
+  });
+});
+
+describe("filterImplausiblePrices", () => {
+  function offer(store: string, price: number): Offer {
+    return { store, price, url: `https://${store}/item` };
+  }
+
+  it("drops a price far below the pack's median (e.g. a mismatched accessory)", () => {
+    // Real-world case this guards against: an 85" TV query returning a $49.97 "offer"
+    // (actually a mount or remote) alongside genuine $600+ TV prices.
+    const offers = [
+      offer("walmart.com", 49.97),
+      offer("walmart.com", 678.0),
+      offer("walmart.com", 898.0),
+      offer("ebay.com", 720.0),
+    ];
+    const result = filterImplausiblePrices(offers);
+    expect(result.map((o) => o.price)).not.toContain(49.97);
+    expect(result.length).toBe(3);
+  });
+
+  it("keeps a genuinely cheaper offer that's still within a reasonable range of the pack", () => {
+    const offers = [offer("a.com", 520), offer("b.com", 678), offer("c.com", 700), offer("d.com", 720)];
+    const result = filterImplausiblePrices(offers);
+    expect(result.length).toBe(4);
+  });
+
+  it("does not filter with fewer than 3 offers (no reliable median)", () => {
+    const offers = [offer("a.com", 10), offer("b.com", 900)];
+    const result = filterImplausiblePrices(offers);
+    expect(result.length).toBe(2);
+  });
+
+  it("never filters down to zero, even with an extreme split", () => {
+    // Two low outliers, two high genuine offers — the low pair gets dropped, but the
+    // median-and-above half always survives (median is drawn from the array itself).
+    const offers = [offer("a.com", 1), offer("b.com", 1), offer("c.com", 1000), offer("d.com", 1000)];
+    const result = filterImplausiblePrices(offers);
+    expect(result.length).toBe(2);
+    expect(result.every((o) => o.price === 1000)).toBe(true);
   });
 });

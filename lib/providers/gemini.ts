@@ -123,15 +123,15 @@ const OFFER_RESPONSE_SCHEMA = {
   },
 };
 
-function buildExtractionPrompt(answerText: string, resolved: ResolvedChunk[]): string {
+function buildExtractionPrompt(answerText: string, resolved: ResolvedChunk[], productQuery: string): string {
   const list = resolved.map((r) => `${r.index}: ${r.domainLabel}`).join("\n");
-  return `Web search summary about current prices:
+  return `Web search summary about current prices for exactly this product: "${productQuery}"
 ${answerText}
 
 Numbered list of verified retailers found in that search:
 ${list}
 
-Extract one entry per distinct price mentioned above that can be confidently attributed to one of the numbered retailers. For each entry, output "storeIndex" as the number from the list above — never a store name or URL, only the index. Only include entries that map to a listed index; omit anything you can't confidently map. If a price isn't in USD, set "currency" to its 3-letter code, otherwise "USD".`;
+Extract one entry per distinct price mentioned above that (a) can be confidently attributed to one of the numbered retailers, AND (b) is genuinely the price of the exact product above — same size, model, and specs. Skip any price for an accessory, replacement part, mount, remote, cable, protection plan, case, or a different size/model/variant, even if the summary mentions it. When in doubt whether a price is for the exact product, omit it rather than guess. For each entry, output "storeIndex" as the number from the list above — never a store name or URL, only the index. Only include entries that map to a listed index. If a price isn't in USD, set "currency" to its 3-letter code, otherwise "USD".`;
 }
 
 interface RawExtractedEntry {
@@ -207,8 +207,9 @@ export class GeminiPriceProvider implements PriceProvider {
     const accessToken = await getAccessToken();
     const projectId = getGcpProjectId();
 
-    const searchPrompt = `Search the web for current prices, in USD, of "${query.query}" at reputable online retailers — especially ${TRUSTED_VENDOR_DOMAINS.join(", ")}.
-Report each retailer where you find a real, current price, along with the price and any shipping or rating information you can find.`;
+    const searchPrompt = `Search the web for current prices, in USD, of exactly this product: "${query.query}" at reputable online retailers — especially ${TRUSTED_VENDOR_DOMAINS.join(", ")}.
+Only report prices for the exact product described — the same size, model, and specs. Do NOT report prices for accessories, replacement parts, mounts, remotes, cables, protection plans, cases, or a different size/model/variant of the product, even if they show up in search results for this query.
+Report each retailer where you find a real, current price for the exact product, along with the price and any shipping or rating information you can find.`;
 
     const call1 = await callVertexGenerateContent(
       MODEL,
@@ -245,7 +246,7 @@ Report each retailer where you find a real, current price, along with the price 
       projectId,
       accessToken,
       {
-        contents: [{ role: "user", parts: [{ text: buildExtractionPrompt(answerText, resolved) }] }],
+        contents: [{ role: "user", parts: [{ text: buildExtractionPrompt(answerText, resolved, query.query) }] }],
         generationConfig: {
           responseMimeType: "application/json",
           responseSchema: OFFER_RESPONSE_SCHEMA,
@@ -288,6 +289,30 @@ Report each retailer where you find a real, current price, along with the price 
     // Only set attribution once we know we're actually returning grounded results.
     this.lastAttributionHtml = renderedContent;
 
-    return offers.sort((a, b) => a.price - b.price).slice(0, MAX_OFFERS);
+    const plausible = filterImplausiblePrices(offers);
+    return plausible.sort((a, b) => a.price - b.price).slice(0, MAX_OFFERS);
   }
+}
+
+/**
+ * Defensive safety net, complementing the prompt instructions above: even with an
+ * explicit "exact product only" instruction, the model can still occasionally attribute
+ * a price to the wrong item (a $49.97 "TV" that's actually a mount or remote, next to
+ * genuine $600+ offers for the actual product). A price far below the pack's median is
+ * the signature of that mismatch — a real bargain is rarely a fraction of what everyone
+ * else charges. Only applied with 3+ offers, where a median is meaningful; with fewer,
+ * there's no reliable "pack" to compare against, so nothing is dropped. (The median is
+ * always drawn from the array itself, so at least half the offers are always >= it —
+ * this can never filter down to zero, no fallback-to-unfiltered branch needed.)
+ */
+export function filterImplausiblePrices(offers: Offer[]): Offer[] {
+  if (offers.length < 3) return offers;
+
+  const sortedPrices = offers.map((o) => o.price).sort((a, b) => a - b);
+  const mid = Math.floor(sortedPrices.length / 2);
+  const median =
+    sortedPrices.length % 2 === 0 ? (sortedPrices[mid - 1] + sortedPrices[mid]) / 2 : sortedPrices[mid];
+
+  const MIN_FRACTION_OF_MEDIAN = 0.35;
+  return offers.filter((o) => o.price >= median * MIN_FRACTION_OF_MEDIAN);
 }
