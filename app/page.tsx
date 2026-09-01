@@ -89,9 +89,19 @@ export default function HomePage() {
         return;
       }
       const { result } = data;
-      if (result.confidence < 0.6 && result.candidates && result.candidates.length > 0) {
-        setCandidates(result.candidates);
-        setPhase("disambiguating");
+      if (result.confidence < 0.6) {
+        if (result.candidates && result.candidates.length > 0) {
+          setCandidates(result.candidates);
+          setPhase("disambiguating");
+        } else {
+          setErrorMessage("Could not identify a product from that. Please try a clearer photo or more specific text.");
+          setPhase("error");
+        }
+        return;
+      }
+      if (!result.query || result.query.trim().length === 0) {
+        setErrorMessage("Could not identify a product from that. Please try a clearer photo or more specific text.");
+        setPhase("error");
         return;
       }
       await runSearch(result);
