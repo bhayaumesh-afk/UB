@@ -35,12 +35,17 @@ import type { PriceProvider } from "./types";
 // shown — see components/SearchAttribution.tsx and lastAttributionHtml below.
 
 const MODEL = "gemini-2.5-flash";
-// Empirically measured against the live endpoint: the grounded search call (call 1) takes
-// ~12s on its own — Google executes real search queries before responding — leaving too
-// little margin under a 15s budget once real-world network variance is added. The
-// structured-extraction call (call 2, no tools) is comfortably ~6s. One shared, wider
-// budget covers both without needing separate constants.
-const CALL_TIMEOUT_MS = 25000;
+// Empirically measured against the live endpoint across several queries: the grounded
+// search call (call 1) typically takes 12-20s — Google executes real search queries
+// before responding — with observed spikes well past that (one run needed ~25s+). This
+// is real tail latency, not a fluke to special-case: 25s left no margin and intermittently
+// aborted, silently serving mock data instead. The structured-extraction call (call 2, no
+// tools) is comfortably ~6s, so it isn't the constraint. A generous shared budget avoids
+// tuning this again on the next slow outlier. NOTE for eventual deployment: a serverless
+// platform's function-duration limit (e.g. Vercel's default is much shorter) will need to
+// be raised to match — see `maxDuration` route segment config — or this endpoint will hit
+// a platform-level timeout regardless of this constant.
+const CALL_TIMEOUT_MS = 45000;
 const RESOLVE_TIMEOUT_MS = 5000;
 const MAX_OFFERS = 8;
 const DEFAULT_LOCATION = "us-central1";
