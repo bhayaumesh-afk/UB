@@ -207,18 +207,44 @@ not a broad/owner role.
 Input UI (3 tabs), `/api/identify` (originally Claude, since replaced — see Phase 2), mock
 price provider, results UI with best-price highlight, demo-mode banner.
 
-**Phase 2 — Live pricing + Gemini identification (in progress)**
-SerpApi provider, currency conversion, caching, empty/error states, and rate limiting are
-built and merged. The Gemini-grounded pricing provider and trusted-vendor allow-list are
-merged. Current work: replace Claude with Gemini/Vertex AI (same service-account
-credential) for identification too, so the app has a single AI provider end to end with no
-`ANTHROPIC_API_KEY` dependency. Production deployment (Vercel) is intentionally deferred —
-not in scope right now; verification happens via local preview only.
+**Phase 2 — Live pricing + Gemini identification (done, live-verified)**
+SerpApi provider, currency conversion, caching, empty/error states, rate limiting, the
+Gemini-grounded pricing provider, the trusted-vendor allow-list, and Gemini/Vertex AI
+identification (replacing Claude entirely — no `ANTHROPIC_API_KEY` in this app) are all
+built and merged. This was verified against the real service-account credential, not just
+unit tests, which surfaced and fixed two real bugs:
+- The grounded search call's timeout had no real margin against actual Gemini latency
+  (12-20s typical, observed spikes past that) and was intermittently, silently falling back
+  to mock data while reporting success. Fixed: widened to 45s based on live measurement
+  across several fresh queries.
+- A low-confidence identify result with no candidates (e.g. a genuinely unidentifiable
+  photo) could reach the price-search call unguarded — sometimes a 400, sometimes a
+  meaningless live search that silently degraded to mock. Fixed: the confidence gate now
+  always resolves to either the candidate picker or a clear "could not identify" message.
+
+Confirmed live and working: Name, Description, and Photo tabs all produce real Gemini
+results with correct currency handling, trusted-retailer links, and the required Google
+Search attribution widget. Production deployment (Vercel) remains intentionally deferred —
+not in scope right now; verification is local-preview only.
+
+**Known limitations to revisit, not blockers:**
+- **Latency**: live search typically takes 30-47s end to end (grounded search is
+  inherently slow — Google executes a real search before responding). There's a loading
+  message during this wait; a progress indicator or partial-results streaming would be a
+  worthwhile future polish, not a correctness issue.
+- **Loose text-based matching**: a vague description can identify the wrong specific model
+  (e.g. a prior generation) and surface implausible outlier prices from a loosely-matched
+  listing. A price-plausibility filter (e.g. dropping offers far below the median for a
+  query) is a reasonable future improvement; not attempted yet.
+- **Deployment readiness**: if/when Vercel deployment resumes, the serverless function
+  duration limit will need to be raised to accommodate the ~45s worst case (see
+  `maxDuration` route segment config) — see the code comment in `lib/providers/gemini.ts`.
 
 **Phase 3 — Stretch**
 Price-history sparkline (needs a lightweight store, e.g. Supabase, for daily snapshots),
 email price-drop alerts, affiliate link tagging, richer multi-candidate disambiguation,
-mobile polish, basic analytics.
+mobile polish, basic analytics, price-plausibility filtering (pulled up from Phase 2 known
+limitations above).
 
 ## Explicit non-goals (MVP)
 
